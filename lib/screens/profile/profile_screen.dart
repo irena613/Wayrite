@@ -23,7 +23,8 @@ class ProfileScreen extends StatelessWidget {
     return ListenableBuilder(
       listenable: appStore,
       builder: (context, _) {
-        final user = appStore.currentUser!;
+        final user = appStore.currentUser;
+        if (user == null) return const SizedBox.shrink();
         final posts = appStore.postsByUser(user.id);
         final friendsCount = appStore.friendsOf(user.id).length;
 
@@ -34,8 +35,9 @@ class ProfileScreen extends StatelessWidget {
               IconButton(
                 tooltip: 'Одјави се',
                 icon: const Icon(AppIcons.logout),
-                onPressed: () {
-                  appStore.logout();
+                onPressed: () async {
+                  await appStore.logout();
+                  if (!context.mounted) return;
                   Navigator.of(context).pushAndRemoveUntil(
                     MaterialPageRoute(builder: (_) => const LoginScreen()),
                     (route) => false,

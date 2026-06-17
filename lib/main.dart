@@ -1,15 +1,18 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'core/theme/app_theme.dart';
+import 'data/app_store.dart';
+import 'firebase_options.dart';
 import 'screens/auth/login_screen.dart';
+import 'screens/home/home_shell.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await appStore.restoreSession();
   runApp(const TimskiApp());
 }
 
-/// Root widget. Апликацијата секогаш стартува на LoginScreen — за реален
-/// Firebase backend ова е местото каде што би се проверувал
-/// `FirebaseAuth.instance.currentUser` и директно да се скока на HomeShell
-/// ако веќе постои активна сесија (види docs/FIREBASE_SETUP.md).
 class TimskiApp extends StatelessWidget {
   const TimskiApp({super.key});
 
@@ -19,7 +22,7 @@ class TimskiApp extends StatelessWidget {
       title: 'Тимски',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
-      home: const LoginScreen(),
+      home: appStore.isLoggedIn ? const HomeShell() : const LoginScreen(),
     );
   }
 }

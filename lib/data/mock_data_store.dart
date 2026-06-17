@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/app_user.dart';
@@ -40,54 +41,62 @@ class MockDataStore extends ChangeNotifier {
   // Auth
   // ---------------------------------------------------------------------
 
+  /// Проверува дали постои активна Firebase сесија и ја враќа во appStore.
+  Future<void> restoreSession() async {
+    final firebaseUser = FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) return;
+    _upsertFirebaseUser(firebaseUser);
+    currentUserId = firebaseUser.uid;
+  }
+
   /// Враќа порака за грешка, или null ако успешно се најавил.
-  String? login(String email, String password) {
-    final normalizedEmail = email.trim().toLowerCase();
-    final storedPassword = _passwordsByEmail[normalizedEmail];
-    if (storedPassword == null) {
-      return 'Не постои корисник со овој е-маил.';
+  Future<String?> login(String email, String password) async {
+    try {
+      final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      _upsertFirebaseUser(credential.user!);
+      currentUserId = credential.user!.uid;
+      notifyListeners();
+      return null;
+    } on FirebaseAuthException catch (e) {
+      return _authError(e.code);
     }
-    if (storedPassword != password) {
-      return 'Погрешна лозинка.';
-    }
-    final user = _users.firstWhere((u) => u.email == normalizedEmail);
-    currentUserId = user.id;
-    notifyListeners();
-    return null;
   }
 
   /// Враќа порака за грешка, или null ако успешно се регистрирал.
-  String? register({
+  Future<String?> register({
     required String name,
     required String username,
     required String email,
     required String password,
-  }) {
-    final normalizedEmail = email.trim().toLowerCase();
-    final normalizedUsername = username.trim().toLowerCase();
+  }) async {
     if (name.trim().isEmpty || username.trim().isEmpty) {
       return 'Внеси име и корисничко име.';
     }
-    if (_passwordsByEmail.containsKey(normalizedEmail)) {
-      return 'Веќе постои корисник со овој е-маил.';
-    }
-    if (_users.any((u) => u.username.toLowerCase() == normalizedUsername)) {
+    if (_users.any((u) => u.username.toLowerCase() == username.trim().toLowerCase())) {
       return 'Корисничкото име е веќе зафатено.';
     }
-    if (password.length < 6) {
-      return 'Лозинката мора да има најмалку 6 карактери.';
+    try {
+      final credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: email.trim(),
+        password: password,
+      );
+      await credential.user!.updateDisplayName(name.trim());
+      final user = AppUser(
+        id: credential.user!.uid,
+        name: name.trim(),
+        username: username.trim().toLowerCase(),
+        email: email.trim().toLowerCase(),
+      );
+      _users.add(user);
+      currentUserId = credential.user!.uid;
+      notifyListeners();
+      return null;
+    } on FirebaseAuthException catch (e) {
+      return _authError(e.code);
     }
-    final user = AppUser(
-      id: 'u${_users.length + 1}_${DateTime.now().millisecondsSinceEpoch}',
-      name: name.trim(),
-      username: normalizedUsername,
-      email: normalizedEmail,
-    );
-    _users.add(user);
-    _passwordsByEmail[normalizedEmail] = password;
-    currentUserId = user.id;
-    notifyListeners();
-    return null;
   }
 
   /// Брз начин да се прегледа апликацијата без рачно регистрирање.
@@ -96,9 +105,32 @@ class MockDataStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void logout() {
+  Future<void> logout() async {
+    await FirebaseAuth.instance.signOut();
     currentUserId = null;
     notifyListeners();
+  }
+
+  void _upsertFirebaseUser(User firebaseUser) {
+    if (_users.any((u) => u.id == firebaseUser.uid)) return;
+    _users.add(AppUser(
+      id: firebaseUser.uid,
+      name: firebaseUser.displayName ?? firebaseUser.email!.split('@').first,
+      username: firebaseUser.email!.split('@').first,
+      email: firebaseUser.email!,
+    ));
+  }
+
+  String _authError(String code) {
+    return switch (code) {
+      'user-not-found' || 'invalid-credential' || 'wrong-password' =>
+        'Погрешен е-маил или лозинка.',
+      'email-already-in-use' => 'Веќе постои корисник со овој е-маил.',
+      'weak-password' => 'Лозинката мора да има најмалку 6 карактери.',
+      'invalid-email' => 'Невалидна е-маил адреса.',
+      'network-request-failed' => 'Нема интернет конекција.',
+      _ => 'Се случи грешка. Обиди се повторно.',
+    };
   }
 
   void updateProfile({String? name, String? username, String? bio}) {

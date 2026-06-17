@@ -36,7 +36,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_passwordController.text != _confirmController.text) {
       setState(() => _error = 'Лозинките не се совпаѓаат.');
@@ -46,12 +46,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _loading = true;
       _error = null;
     });
-    final error = appStore.register(
+    final error = await appStore.register(
       name: _nameController.text,
       username: _usernameController.text,
       email: _emailController.text,
       password: _passwordController.text,
     );
+    if (!mounted) return;
     setState(() => _loading = false);
     if (error != null) {
       setState(() => _error = error);

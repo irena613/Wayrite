@@ -8,12 +8,6 @@ import '../../core/widgets/user_list_tile.dart';
 import '../../data/app_store.dart';
 import '../../models/relationship_status.dart';
 
-/// Екран за пребарување корисници и барања за пријателство.
-///
-/// UI flow: Search (празно) -> листа на пристигнати барања за пријателство
-///          Search + внес на текст -> резултати од пребарување со копче
-///          Додај / Чека одговор / Прифати+Одбиј / Пријатели, во зависност
-///          од моменталниот статус на врската.
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
 
@@ -35,27 +29,29 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Пребарување')),
-      body: ListenableBuilder(
-        listenable: appStore,
-        builder: (context, _) {
-          final results = appStore.searchUsers(_query);
-          final incoming = appStore.incomingRequestUsers();
-
-          return Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(AppSpacing.lg),
-                child: TextField(
-                  controller: _controller,
-                  onChanged: (v) => setState(() => _query = v),
-                  decoration: const InputDecoration(
-                    hintText: 'Пребарај по име или корисничко име...',
-                    prefixIcon: Icon(AppIcons.search),
-                  ),
-                ),
+      // TextField is outside ListenableBuilder so that typing (setState) and
+      // store notifications don't both rebuild the same subtree simultaneously,
+      // which caused the 'child == _child' framework assertion.
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: TextField(
+              controller: _controller,
+              onChanged: (v) => setState(() => _query = v),
+              decoration: const InputDecoration(
+                hintText: 'Пребарај по ime или корисничко ime...',
+                prefixIcon: Icon(AppIcons.search),
               ),
-              Expanded(
-                child: ListView(
+            ),
+          ),
+          Expanded(
+            child: ListenableBuilder(
+              listenable: appStore,
+              builder: (context, _) {
+                final results = appStore.searchUsers(_query);
+                final incoming = appStore.incomingRequestUsers();
+                return ListView(
                   padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
                   children: [
                     if (_query.isEmpty) ...[
@@ -64,6 +60,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         const SizedBox(height: AppSpacing.sm),
                         ...incoming.map(
                           (u) => UserListTile(
+                            key: ValueKey('req_${u.id}'),
                             user: u,
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
@@ -88,7 +85,7 @@ class _SearchScreenState extends State<SearchScreen> {
                           child: EmptyState(
                             icon: AppIcons.search,
                             title: 'Пребарај пријатели',
-                            subtitle: 'Внеси име или корисничко име за да започнеш.',
+                            subtitle: 'Внеси ime или корисничко ime за да започнеш.',
                           ),
                         ),
                     ] else if (results.isEmpty)
@@ -100,14 +97,20 @@ class _SearchScreenState extends State<SearchScreen> {
                         ),
                       )
                     else
-                      ...results.map((u) => UserListTile(user: u, trailing: _actionFor(u.id))),
+                      ...results.map(
+                        (u) => UserListTile(
+                          key: ValueKey(u.id),
+                          user: u,
+                          trailing: _actionFor(u.id),
+                        ),
+                      ),
                     const SizedBox(height: AppSpacing.xl),
                   ],
-                ),
-              ),
-            ],
-          );
-        },
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

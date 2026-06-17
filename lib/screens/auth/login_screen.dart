@@ -33,13 +33,14 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() {
       _loading = true;
       _error = null;
     });
-    final error = appStore.login(_emailController.text, _passwordController.text);
+    final error = await appStore.login(_emailController.text, _passwordController.text);
+    if (!mounted) return;
     setState(() => _loading = false);
     if (error != null) {
       setState(() => _error = error);
