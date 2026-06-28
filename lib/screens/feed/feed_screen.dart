@@ -6,13 +6,40 @@ import '../../core/widgets/post_card.dart';
 import '../../data/app_store.dart';
 import '../post/post_detail_screen.dart';
 
-/// Feed екран со хронолошки приказ на објави (најнови прво).
-///
-/// UI flow: Feed -> тап на објава -> PostDetail (коментари + лајкови)
-///          Feed -> повлечи надолу -> освежување
-///          Feed -> FAB (+) во HomeShell -> CreatePost
-class FeedScreen extends StatelessWidget {
+class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
+
+  @override
+  State<FeedScreen> createState() => _FeedScreenState();
+}
+
+class _FeedScreenState extends State<FeedScreen> {
+  final _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Load first page on open
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appStore.loadFeed(refresh: true);
+    });
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 300) {
+      appStore.loadFeed();
+    }
+  }
+
+  Future<void> _onRefresh() => appStore.loadFeed(refresh: true);
 
   @override
   Widget build(BuildContext context) {
@@ -21,7 +48,37 @@ class FeedScreen extends StatelessWidget {
       body: ListenableBuilder(
         listenable: appStore,
         builder: (context, _) {
-          final posts = appStore.feedPosts;
+          // Use Firestore posts if available, otherwise fall back to mock
+          final posts = appStore.firestorePosts.isNotEmpty
+              ? appStore.firestorePosts
+              : appStore.feedPosts;
+
+          // Error state — only show if no posts to display at all
+          if (appStore.feedError != null && posts.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.wifi_off, size: 48, color: Colors.grey),
+                  const SizedBox(height: AppSpacing.md),
+                  Text(appStore.feedError!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.grey)),
+                  const SizedBox(height: AppSpacing.lg),
+                  OutlinedButton(
+                    onPressed: () => appStore.loadFeed(refresh: true),
+                    child: const Text('Обиди се повторно'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          // Initial loading state — only show if no posts to display yet
+          if (appStore.feedLoading && posts.isEmpty) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
           if (posts.isEmpty) {
             return const EmptyState(
               icon: AppIcons.feed,
@@ -29,20 +86,40 @@ class FeedScreen extends StatelessWidget {
               subtitle: 'Биди прв што ќе сподели постигнување или откажување.',
             );
           }
+
           return RefreshIndicator(
-            onRefresh: () async {
-              await Future.delayed(const Duration(milliseconds: 400));
-            },
+            onRefresh: _onRefresh,
             child: ListView.separated(
+              controller: _scrollController,
               padding: const EdgeInsets.all(AppSpacing.lg),
-              itemCount: posts.length,
+              itemCount: posts.length + 1,
               separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.md),
               itemBuilder: (context, index) {
+                if (index == posts.length) {
+                  if (appStore.feedLoading) {
+                    return const Padding(
+                      padding: EdgeInsets.all(AppSpacing.lg),
+                      child: Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  if (!appStore.hasMoreFeed) {
+                    return const Padding(
+                      padding: EdgeInsets.all(AppSpacing.lg),
+                      child: Center(
+                        child: Text('Нема повеќе објави',
+                            style: TextStyle(color: Colors.grey)),
+                      ),
+                    );
+                  }
+                  return const SizedBox.shrink();
+                }
+
                 final post = posts[index];
                 return PostCard(
                   post: post,
                   onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => PostDetailScreen(postId: post.id)),
+                    MaterialPageRoute(
+                        builder: (_) => PostDetailScreen(postId: post.id)),
                   ),
                   onLikeTap: () => appStore.toggleLike(post.id),
                 );

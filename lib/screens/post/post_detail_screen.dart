@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_icons.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/app_typography.dart';
@@ -9,6 +10,9 @@ import '../../core/widgets/like_button.dart';
 import '../../core/widgets/post_type_badge.dart';
 import '../../core/widgets/user_avatar.dart';
 import '../../data/app_store.dart';
+import '../../models/post.dart';
+
+String _dayLabel(int days) => days == 1 ? 'ден' : 'дена';
 
 /// Детален преглед на објава — UI за коментари и реакции (like).
 ///
@@ -48,7 +52,10 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
       body: ListenableBuilder(
         listenable: appStore,
         builder: (context, _) {
-          final post = appStore.feedPosts.firstWhere((p) => p.id == widget.postId);
+          final post = appStore.postById(widget.postId);
+          if (post == null) {
+            return const Center(child: Text('Објавата не е пронајдена.'));
+          }
           final author = appStore.userById(post.authorId);
           final comments = appStore.commentsForPost(post.id);
           final currentUserId = appStore.currentUserId;
@@ -93,6 +100,11 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: AppSpacing.sm),
+                    if (post.type == PostType.quit && post.streakDays > 0)
+                      _StreakBadgeDetail(days: post.streakDays)
+                    else if (post.type != PostType.quit && post.durationDays > 0)
+                      _DurationBadgeDetail(days: post.durationDays),
                     const SizedBox(height: AppSpacing.md),
                     const Divider(),
                     LikeButton(
@@ -141,6 +153,60 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+class _StreakBadgeDetail extends StatelessWidget {
+  final int days;
+  const _StreakBadgeDetail({required this.days});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.quit.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('🔥', style: TextStyle(fontSize: 13)),
+          const SizedBox(width: 4),
+          Text(
+            '$days ${_dayLabel(days)} streak',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.quit),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DurationBadgeDetail extends StatelessWidget {
+  final int days;
+  const _DurationBadgeDetail({required this.days});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.achievement.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.calendar_today, size: 12, color: AppColors.achievement),
+          const SizedBox(width: 4),
+          Text(
+            '$days ${_dayLabel(days)}',
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.achievement),
+          ),
+        ],
       ),
     );
   }

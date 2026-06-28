@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../data/app_store.dart';
 import '../../models/post.dart';
+import '../theme/app_colors.dart';
 import '../theme/app_icons.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_typography.dart';
@@ -77,6 +78,11 @@ class PostCard extends StatelessWidget {
                   ),
                 ],
               ),
+              const SizedBox(height: AppSpacing.sm),
+              if (post.type == PostType.quit && post.streakDays > 0)
+                _StreakBadge(days: post.streakDays)
+              else if (post.type != PostType.quit && post.durationDays > 0)
+                _DurationBadge(days: post.durationDays),
               const Divider(height: AppSpacing.lg + AppSpacing.sm),
               Row(
                 children: [
@@ -93,4 +99,72 @@ class PostCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _StreakBadge extends StatelessWidget {
+  final int days;
+  const _StreakBadge({required this.days});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.quit.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('🔥', style: TextStyle(fontSize: 13)),
+          const SizedBox(width: 4),
+          Text(
+            '$days ${_dayLabel(days)} streak',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.quit,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DurationBadge extends StatelessWidget {
+  final int days;
+  const _DurationBadge({required this.days});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.achievement.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.calendar_today, size: 12, color: AppColors.achievement),
+          const SizedBox(width: 4),
+          Text(
+            '$days ${_dayLabel(days)}',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.achievement,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _dayLabel(int days) {
+  if (days == 1) return 'ден';
+  if (days >= 2 && days <= 4) return 'дена';
+  return 'дена';
 }

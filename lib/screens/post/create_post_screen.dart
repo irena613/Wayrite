@@ -27,6 +27,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   PostType _type = PostType.achievement;
   DateTime _startDate = DateTime.now();
   DateTime? _endDate;
+  bool _loading = false;
 
   @override
   void dispose() {
@@ -46,20 +47,28 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
     setState(() {
       if (isStart) {
         _startDate = picked;
+        if (_endDate != null && _endDate!.isBefore(_startDate)) _endDate = null;
       } else {
+        if (picked.isBefore(_startDate)) return;
         _endDate = picked;
       }
     });
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    appStore.createPost(
+    setState(() => _loading = true);
+    await appStore.createPost(
       type: _type,
       title: _titleController.text.trim(),
       description: _descriptionController.text.trim(),
       startDate: _startDate,
       endDate: _endDate,
+    );
+    if (!mounted) return;
+    setState(() => _loading = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Објавата е зачувана! ✓')),
     );
     Navigator.of(context).pop();
   }
@@ -140,7 +149,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                 ],
               ),
               const SizedBox(height: AppSpacing.xl),
-              PrimaryButton(label: 'Објави', onPressed: _submit),
+              PrimaryButton(label: 'Објави', onPressed: _submit, loading: _loading),
             ],
           ),
         ),

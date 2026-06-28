@@ -40,7 +40,7 @@ class _SearchScreenState extends State<SearchScreen> {
               controller: _controller,
               onChanged: (v) => setState(() => _query = v),
               decoration: const InputDecoration(
-                hintText: 'Пребарај по ime или корисничко ime...',
+                hintText: 'Пребарај по име или корисничко име...',
                 prefixIcon: Icon(AppIcons.search),
               ),
             ),
@@ -85,7 +85,7 @@ class _SearchScreenState extends State<SearchScreen> {
                           child: EmptyState(
                             icon: AppIcons.search,
                             title: 'Пребарај пријатели',
-                            subtitle: 'Внеси ime или корисничко ime за да започнеш.',
+                            subtitle: 'Внеси име или корисничко име за да започнеш.',
                           ),
                         ),
                     ] else if (results.isEmpty)

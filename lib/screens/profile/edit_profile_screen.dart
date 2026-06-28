@@ -19,6 +19,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   late final TextEditingController _nameController;
   late final TextEditingController _usernameController;
   late final TextEditingController _bioController;
+  late final TextEditingController _emailController;
 
   @override
   void initState() {
@@ -27,6 +28,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _nameController = TextEditingController(text: user.name);
     _usernameController = TextEditingController(text: user.username);
     _bioController = TextEditingController(text: user.bio);
+    _emailController = TextEditingController(text: user.email);
   }
 
   @override
@@ -34,6 +36,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _nameController.dispose();
     _usernameController.dispose();
     _bioController.dispose();
+    _emailController.dispose();
     super.dispose();
   }
 
@@ -49,7 +52,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = appStore.currentUser!;
     return Scaffold(
       appBar: AppBar(title: const Text('Уреди профил')),
       body: SingleChildScrollView(
@@ -73,7 +75,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               const SizedBox(height: AppSpacing.md),
               AppTextField(
                 label: 'Е-маил',
-                controller: TextEditingController(text: user.email),
+                controller: _emailController,
                 keyboardType: TextInputType.emailAddress,
                 readOnly: true,
               ),

@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
@@ -24,6 +25,20 @@ class MockDataStore extends ChangeNotifier {
   final List<Post> _posts = [];
   final List<Comment> _comments = [];
   final List<NotificationItem> _notifications = [];
+
+  // Firestore feed state
+  final List<Post> _firestorePosts = [];
+  DocumentSnapshot? _lastFeedDoc;
+  bool _hasMoreFeed = true;
+  bool _feedLoading = false;
+  String? _feedError;
+
+  static const int _pageSize = 10;
+
+  List<Post> get firestorePosts => List.unmodifiable(_firestorePosts);
+  bool get feedLoading => _feedLoading;
+  bool get hasMoreFeed => _hasMoreFeed;
+  String? get feedError => _feedError;
 
   // userId -> set на пријатели (симетрично)
   final Map<String, Set<String>> _friends = {};
@@ -79,6 +94,14 @@ class MockDataStore extends ChangeNotifier {
       return 'Корисничкото име е веќе зафатено.';
     }
     try {
+      final existing = await FirebaseFirestore.instance
+          .collection('users')
+          .where('username', isEqualTo: username.trim().toLowerCase())
+          .limit(1)
+          .get();
+      if (existing.docs.isNotEmpty) return 'Корисничкото име е веќе зафатено.';
+    } catch (_) {}
+    try {
       final credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: email.trim(),
         password: password,
@@ -92,6 +115,21 @@ class MockDataStore extends ChangeNotifier {
       );
       _users.add(user);
       currentUserId = credential.user!.uid;
+
+      // Save user profile to Firestore
+      try {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(credential.user!.uid)
+            .set({
+          'name': user.name,
+          'username': user.username,
+          'email': user.email,
+          'bio': '',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      } catch (_) {}
+
       notifyListeners();
       return null;
     } on FirebaseAuthException catch (e) {
@@ -139,6 +177,20 @@ class MockDataStore extends ChangeNotifier {
     user.name = name ?? user.name;
     user.username = username ?? user.username;
     user.bio = bio ?? user.bio;
+
+    final updates = <String, dynamic>{
+      if (name != null) 'name': name,
+      if (username != null) 'username': username,
+      if (bio != null) 'bio': bio,
+    };
+    if (updates.isNotEmpty) {
+      FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.id)
+          .update(updates)
+          .catchError((_) {});
+    }
+
     notifyListeners();
   }
 
@@ -146,7 +198,23 @@ class MockDataStore extends ChangeNotifier {
   // Users / search / friends
   // ---------------------------------------------------------------------
 
-  AppUser userById(String id) => _users.firstWhere((u) => u.id == id);
+  AppUser userById(String id) {
+    try {
+      return _users.firstWhere((u) => u.id == id);
+    } catch (_) {
+      return AppUser(id: id, name: 'Корисник', username: id, email: '');
+    }
+  }
+
+  Post? postById(String id) {
+    try {
+      return _posts.firstWhere((p) => p.id == id);
+    } catch (_) {}
+    try {
+      return _firestorePosts.firstWhere((p) => p.id == id);
+    } catch (_) {}
+    return null;
+  }
 
   List<AppUser> searchUsers(String query) {
     final q = query.trim().toLowerCase();
@@ -234,31 +302,111 @@ class MockDataStore extends ChangeNotifier {
     return feedPosts.where((p) => p.authorId == userId).toList();
   }
 
-  Post createPost({
+  // ---------------------------------------------------------------------
+  // Firestore feed — loading, pagination, refresh
+  // ---------------------------------------------------------------------
+
+  Future<void> loadFeed({bool refresh = false}) async {
+    if (_feedLoading) return;
+    if (refresh) {
+      _firestorePosts.clear();
+      _lastFeedDoc = null;
+      _hasMoreFeed = true;
+      _feedError = null;
+    }
+    if (!_hasMoreFeed) return;
+
+    _feedLoading = true;
+    _feedError = null;
+    notifyListeners();
+
+    try {
+      var query = FirebaseFirestore.instance
+          .collection('posts')
+          .orderBy('createdAt', descending: true)
+          .limit(_pageSize);
+
+      if (_lastFeedDoc != null) {
+        query = query.startAfterDocument(_lastFeedDoc!);
+      }
+
+      final snapshot = await query.get();
+
+      if (snapshot.docs.isEmpty) {
+        _hasMoreFeed = false;
+      } else {
+        _lastFeedDoc = snapshot.docs.last;
+        final newPosts = snapshot.docs.map(Post.fromFirestore).toList();
+        _firestorePosts.addAll(newPosts);
+        if (snapshot.docs.length < _pageSize) _hasMoreFeed = false;
+
+        // Make sure authors are in _users
+        for (final post in newPosts) {
+          await _ensureUserLoaded(post.authorId);
+        }
+      }
+    } catch (e) {
+      _feedError = 'Не може да се вчитаат објавите. Провери го интернетот.';
+    }
+
+    _feedLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> _ensureUserLoaded(String userId) async {
+    if (_users.any((u) => u.id == userId)) return;
+    try {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
+      if (doc.exists) {
+        final d = doc.data()!;
+        _users.add(AppUser(
+          id: userId,
+          name: d['name'] as String? ?? 'Корисник',
+          username: d['username'] as String? ?? userId,
+          email: d['email'] as String? ?? '',
+          bio: d['bio'] as String? ?? '',
+        ));
+      }
+    } catch (_) {}
+  }
+
+  Future<Post> createPost({
     required PostType type,
     required String title,
     required String description,
     required DateTime startDate,
     DateTime? endDate,
-  }) {
+  }) async {
+    final now = DateTime.now();
+    // Pre-generate the Firestore doc ref so _posts and _firestorePosts share the same ID.
+    final docRef = FirebaseFirestore.instance.collection('posts').doc();
     final post = Post(
-      id: 'p${_posts.length + 1}_${DateTime.now().millisecondsSinceEpoch}',
+      id: docRef.id,
       authorId: currentUserId!,
       type: type,
       title: title,
       description: description,
       startDate: startDate,
       endDate: endDate,
-      createdAt: DateTime.now(),
+      createdAt: now,
     );
     _posts.add(post);
+    _firestorePosts.insert(0, post);
+
+    try {
+      await docRef.set(post.toFirestore());
+    } catch (_) {
+      // Write failed — post still lives in-memory so the UI stays consistent.
+    }
+
     notifyListeners();
     return post;
   }
 
   void toggleLike(String postId) {
     if (currentUserId == null) return;
-    final post = _posts.firstWhere((p) => p.id == postId);
+    final post = postById(postId);
+    if (post == null) return;
     final liking = !post.likedByUser(currentUserId!);
     if (liking) {
       post.likedBy.add(currentUserId!);
@@ -273,6 +421,11 @@ class MockDataStore extends ChangeNotifier {
     } else {
       post.likedBy.remove(currentUserId!);
     }
+
+    FirebaseFirestore.instance.collection('posts').doc(postId).update({
+      'likedBy': post.likedBy.toList(),
+    }).catchError((_) {});
+
     notifyListeners();
   }
 
@@ -291,8 +444,14 @@ class MockDataStore extends ChangeNotifier {
       createdAt: DateTime.now(),
     );
     _comments.add(comment);
-    final post = _posts.firstWhere((p) => p.id == postId);
+    final post = postById(postId);
+    if (post == null) return comment;
     post.commentIds.add(comment.id);
+
+    FirebaseFirestore.instance.collection('posts').doc(postId).update({
+      'commentIds': post.commentIds,
+    }).catchError((_) {});
+
     if (post.authorId != currentUserId) {
       _addNotification(
         forUserId: post.authorId,
