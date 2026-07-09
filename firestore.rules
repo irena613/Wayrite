@@ -1,0 +1,53 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: is the caller authenticated?
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Helper: is the caller the owner of the document being written?
+    function isOwner(field) {
+      return request.resource.data[field] == request.auth.uid;
+    }
+
+    // ── Users ──────────────────────────────────────────────────────────────
+    // Any authenticated user can read profiles (needed for search & feed).
+    // Only the user themselves can write their own document.
+    match /users/{userId} {
+      allow read: if isAuth();
+      allow write: if isAuth() && request.auth.uid == userId;
+    }
+
+    // ── Posts ──────────────────────────────────────────────────────────────
+    // Any authenticated user can read posts.
+    // Only the author can create or delete a post.
+    // Any authenticated user can update a post (needed for likedBy /
+    // commentIds array updates by other users).
+    match /posts/{postId} {
+      allow read: if isAuth();
+      allow create: if isAuth() && isOwner("authorId");
+      allow update: if isAuth();
+      allow delete: if isAuth() && resource.data.authorId == request.auth.uid;
+
+      // ── Comments (subcollection) ────────────────────────────────────────
+      // Any authenticated user can read and create comments.
+      // Only the comment author can delete their own comment.
+      match /comments/{commentId} {
+        allow read: if isAuth();
+        allow create: if isAuth() && isOwner("authorId");
+        allow delete: if isAuth()
+          && resource.data.authorId == request.auth.uid;
+      }
+    }
+
+    // ── Notifications ──────────────────────────────────────────────────────
+    // Cloud Functions write notifications via the Admin SDK (bypasses rules).
+    // Recipients can read and mark their own notifications as read.
+    match /notifications/{notifId} {
+      allow read, update: if isAuth()
+        && resource.data.recipientId == request.auth.uid;
+    }
+  }
+}

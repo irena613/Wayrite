@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/app_user.dart';
@@ -18,6 +22,14 @@ import '../models/relationship_status.dart';
 class MockDataStore extends ChangeNotifier {
   MockDataStore() {
     _seedDemoData();
+    // Слушај за освежување на FCM токенот (се случува ретко, но мора да
+    // се регистрира новиот и да се отстрани стариот).
+    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+      if (_fcmToken != null && _fcmToken != newToken) {
+        _unregisterToken(_fcmToken!);
+      }
+      _registerToken(newToken);
+    });
   }
 
   final List<AppUser> _users = [];
@@ -46,6 +58,7 @@ class MockDataStore extends ChangeNotifier {
   final Map<String, Set<String>> _incomingRequests = {};
 
   String? currentUserId;
+  String? _fcmToken;
 
   AppUser? get currentUser =>
       currentUserId == null ? null : userById(currentUserId!);
@@ -62,6 +75,7 @@ class MockDataStore extends ChangeNotifier {
     if (firebaseUser == null) return;
     _upsertFirebaseUser(firebaseUser);
     currentUserId = firebaseUser.uid;
+    unawaited(_initFcm());
   }
 
   /// Враќа порака за грешка, или null ако успешно се најавил.
@@ -74,6 +88,7 @@ class MockDataStore extends ChangeNotifier {
       _upsertFirebaseUser(credential.user!);
       currentUserId = credential.user!.uid;
       notifyListeners();
+      unawaited(_initFcm());
       return null;
     } on FirebaseAuthException catch (e) {
       return _authError(e.code);
@@ -131,6 +146,7 @@ class MockDataStore extends ChangeNotifier {
       } catch (_) {}
 
       notifyListeners();
+      unawaited(_initFcm());
       return null;
     } on FirebaseAuthException catch (e) {
       return _authError(e.code);
@@ -144,6 +160,10 @@ class MockDataStore extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    if (_fcmToken != null) {
+      await _unregisterToken(_fcmToken!);
+      _fcmToken = null;
+    }
     await FirebaseAuth.instance.signOut();
     currentUserId = null;
     notifyListeners();
@@ -169,6 +189,47 @@ class MockDataStore extends ChangeNotifier {
       'network-request-failed' => 'Нема интернет конекција.',
       _ => 'Се случи грешка. Обиди се повторно.',
     };
+  }
+
+  // ---------------------------------------------------------------------
+  // FCM — управување со push-нотификациски токени
+  // ---------------------------------------------------------------------
+
+  /// Бара дозвола за нотификации и го регистрира FCM токенот на уредот.
+  Future<void> _initFcm() async {
+    try {
+      final settings = await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      if (settings.authorizationStatus == AuthorizationStatus.denied) return;
+
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token != null) await _registerToken(token);
+    } catch (_) {
+      // FCM иницијализацијата не смее да ја урне апликацијата.
+    }
+  }
+
+  /// Додава токен во `users/{uid}.fcmTokens` преку Cloud Function.
+  Future<void> _registerToken(String token) async {
+    if (currentUserId == null) return;
+    try {
+      _fcmToken = token;
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('registerFcmToken')
+          .call(<String, dynamic>{'token': token});
+    } catch (_) {}
+  }
+
+  /// Отстранува токен од `users/{uid}.fcmTokens` преку Cloud Function.
+  Future<void> _unregisterToken(String token) async {
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('unregisterFcmToken')
+          .call(<String, dynamic>{'token': token});
+    } catch (_) {}
   }
 
   void updateProfile({String? name, String? username, String? bio}) {
@@ -336,7 +397,16 @@ class MockDataStore extends ChangeNotifier {
         _hasMoreFeed = false;
       } else {
         _lastFeedDoc = snapshot.docs.last;
-        final newPosts = snapshot.docs.map(Post.fromFirestore).toList();
+        // Parse each doc defensively — one malformed post must not sink the
+        // whole feed. Skip and log bad docs so they can be fixed in Firestore.
+        final newPosts = <Post>[];
+        for (final doc in snapshot.docs) {
+          try {
+            newPosts.add(Post.fromFirestore(doc));
+          } catch (_) {
+            // Skip malformed post docs so one bad document can't sink the feed.
+          }
+        }
         _firestorePosts.addAll(newPosts);
         if (snapshot.docs.length < _pageSize) _hasMoreFeed = false;
 
@@ -345,7 +415,7 @@ class MockDataStore extends ChangeNotifier {
           await _ensureUserLoaded(post.authorId);
         }
       }
-    } catch (e) {
+    } catch (_) {
       _feedError = 'Не може да се вчитаат објавите. Провери го интернетот.';
     }
 
@@ -394,9 +464,29 @@ class MockDataStore extends ChangeNotifier {
     _firestorePosts.insert(0, post);
 
     try {
-      await docRef.set(post.toFirestore());
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('createPostValidated')
+          .call(<String, dynamic>{
+        'postId': docRef.id,
+        'type': type.name,
+        'title': title,
+        'description': description,
+        'startDate': startDate.toIso8601String(),
+        if (endDate != null) 'endDate': endDate.toIso8601String(),
+      });
+    } on FirebaseFunctionsException catch (e) {
+      if (e.code == 'invalid-argument' || e.code == 'unauthenticated') {
+        // Server rejected the input — roll back optimistic state and surface error.
+        _posts.remove(post);
+        _firestorePosts.remove(post);
+        notifyListeners();
+        rethrow;
+      }
+      // Function not yet deployed or unavailable — fall back to direct write.
+      await docRef.set(post.toFirestore()).catchError((_) {});
     } catch (_) {
-      // Write failed — post still lives in-memory so the UI stays consistent.
+      // Non-Functions error — fall back to direct write.
+      await docRef.set(post.toFirestore()).catchError((_) {});
     }
 
     notifyListeners();
@@ -450,6 +540,18 @@ class MockDataStore extends ChangeNotifier {
 
     FirebaseFirestore.instance.collection('posts').doc(postId).update({
       'commentIds': post.commentIds,
+    }).catchError((_) {});
+
+    // Write comment sub-document — required for onCommentCreated trigger.
+    FirebaseFirestore.instance
+        .collection('posts')
+        .doc(postId)
+        .collection('comments')
+        .doc(comment.id)
+        .set({
+      'authorId': comment.authorId,
+      'text': comment.text,
+      'createdAt': Timestamp.fromDate(comment.createdAt),
     }).catchError((_) {});
 
     if (post.authorId != currentUserId) {

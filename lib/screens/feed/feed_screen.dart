@@ -48,10 +48,11 @@ class _FeedScreenState extends State<FeedScreen> {
       body: ListenableBuilder(
         listenable: appStore,
         builder: (context, _) {
-          // Use Firestore posts if available, otherwise fall back to mock
-          final posts = appStore.firestorePosts.isNotEmpty
-              ? appStore.firestorePosts
-              : appStore.feedPosts;
+          // Only real Firestore posts are shown. The in-memory demo posts
+          // (p1–p5) are not backed by Firestore, so liking/commenting on them
+          // is rejected by security rules and never fires the Cloud Function
+          // triggers. Empty/loading states below handle the no-posts case.
+          final posts = appStore.firestorePosts;
 
           // Error state — only show if no posts to display at all
           if (appStore.feedError != null && posts.isEmpty) {
