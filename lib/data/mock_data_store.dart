@@ -32,11 +32,18 @@ class MockDataStore extends ChangeNotifier {
     });
   }
 
+  @override
+  void dispose() {
+    _stopListeningToCurrentUser();
+    super.dispose();
+  }
+
   final List<AppUser> _users = [];
   final Map<String, String> _passwordsByEmail = {}; // email -> password
   final List<Post> _posts = [];
   final List<Comment> _comments = [];
   final List<NotificationItem> _notifications = [];
+  final List<NotificationItem> _firestoreNotifications = [];
 
   // Firestore feed state
   final List<Post> _firestorePosts = [];
@@ -52,10 +59,14 @@ class MockDataStore extends ChangeNotifier {
   bool get hasMoreFeed => _hasMoreFeed;
   String? get feedError => _feedError;
 
-  // userId -> set на пријатели (симетрично)
-  final Map<String, Set<String>> _friends = {};
-  // targetUserId -> set на userId кои му испратиле барање за пријателство
-  final Map<String, Set<String>> _incomingRequests = {};
+  // Пријателски барања упатени ДО тековниот корисник (сѐ уште нерешени).
+  final Set<String> _incomingRequestFromIds = {};
+  // Пријателски барања што тековниот корисник ги ИСПРАТИЛ (сѐ уште нерешени).
+  final Set<String> _outgoingRequestToIds = {};
+  StreamSubscription<QuerySnapshot>? _incomingRequestsSub;
+  StreamSubscription<QuerySnapshot>? _outgoingRequestsSub;
+  StreamSubscription<DocumentSnapshot>? _currentUserDocSub;
+  StreamSubscription<QuerySnapshot>? _notificationsSub;
 
   String? currentUserId;
   String? _fcmToken;
@@ -75,6 +86,7 @@ class MockDataStore extends ChangeNotifier {
     if (firebaseUser == null) return;
     _upsertFirebaseUser(firebaseUser);
     currentUserId = firebaseUser.uid;
+    _listenToCurrentUser();
     unawaited(_initFcm());
   }
 
@@ -87,6 +99,7 @@ class MockDataStore extends ChangeNotifier {
       );
       _upsertFirebaseUser(credential.user!);
       currentUserId = credential.user!.uid;
+      _listenToCurrentUser();
       notifyListeners();
       unawaited(_initFcm());
       return null;
@@ -130,6 +143,7 @@ class MockDataStore extends ChangeNotifier {
       );
       _users.add(user);
       currentUserId = credential.user!.uid;
+      _listenToCurrentUser();
 
       // Save user profile to Firestore
       try {
@@ -165,6 +179,7 @@ class MockDataStore extends ChangeNotifier {
       _fcmToken = null;
     }
     await FirebaseAuth.instance.signOut();
+    _stopListeningToCurrentUser();
     currentUserId = null;
     notifyListeners();
   }
@@ -277,90 +292,266 @@ class MockDataStore extends ChangeNotifier {
     return null;
   }
 
+  final Set<String> _pendingRemoteSearchQueries = {};
+
+  /// Пребарува локално вчитани корисници веднаш (за responsive UI), и
+  /// паралелно бара по точен `username` во Firestore за корисници што сѐ
+  /// уште не се локално вчитани — потребно откако feed-от е ограничен само
+  /// на пријатели, па нови корисници повеќе не се автоматски вчитуваат
+  /// преку туѓи објави. Точен match (не prefix) - prefix-range query со
+  /// invisible upper-bound character не работеше поуздано преку
+  /// платформскиот канал на Android, па е избегнат.
   List<AppUser> searchUsers(String query) {
     final q = query.trim().toLowerCase();
+    if (q.isEmpty) return [];
+
+    unawaited(_searchUsersRemote(q));
+
     return _users.where((u) {
       if (u.id == currentUserId) return false;
-      if (q.isEmpty) return false;
       return u.name.toLowerCase().contains(q) ||
           u.username.toLowerCase().contains(q);
     }).toList();
   }
 
+  Future<void> _searchUsersRemote(String query) async {
+    if (_pendingRemoteSearchQueries.contains(query)) return;
+    _pendingRemoteSearchQueries.add(query);
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .where('username', isEqualTo: query)
+          .limit(10)
+          .get();
+      var changed = false;
+      for (final doc in snapshot.docs) {
+        if (_users.any((u) => u.id == doc.id)) continue;
+        final d = doc.data();
+        _users.add(AppUser(
+          id: doc.id,
+          name: d['name'] as String? ?? 'Корисник',
+          username: d['username'] as String? ?? doc.id,
+          email: d['email'] as String? ?? '',
+          bio: d['bio'] as String? ?? '',
+          friendIds: List<String>.from(d['friendIds'] as List? ?? []),
+        ));
+        changed = true;
+      }
+      if (changed) notifyListeners();
+    } catch (e) {
+      debugPrint('searchUsers remote query failed: $e');
+    } finally {
+      _pendingRemoteSearchQueries.remove(query);
+    }
+  }
+
+  /// Слуша во реално време за: (а) сопствениот `users` документ (име,
+  /// bio, `friendIds`) и (б) пријателски барања упатени до/од тековниот
+  /// корисник. Замена за поранешните in-memory `_friends`/`_incomingRequests`
+  /// мапи — состојбата сега доаѓа директно од Firestore.
+  void _listenToCurrentUser() {
+    if (currentUserId == null) return;
+    _currentUserDocSub?.cancel();
+    _currentUserDocSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUserId!)
+        .snapshots()
+        .listen((doc) {
+      if (!doc.exists) return;
+      final d = doc.data()!;
+      final user = userById(currentUserId!);
+      user.name = d['name'] as String? ?? user.name;
+      user.username = d['username'] as String? ?? user.username;
+      user.bio = d['bio'] as String? ?? user.bio;
+      user.friendIds = List<String>.from(d['friendIds'] as List? ?? []);
+      notifyListeners();
+    });
+
+    _incomingRequestsSub?.cancel();
+    _incomingRequestsSub = FirebaseFirestore.instance
+        .collection('friendRequests')
+        .where('toUserId', isEqualTo: currentUserId)
+        .snapshots()
+        .listen((snapshot) {
+      _incomingRequestFromIds
+        ..clear()
+        ..addAll(snapshot.docs.map((d) => d['fromUserId'] as String));
+      for (final id in _incomingRequestFromIds) {
+        unawaited(_ensureUserLoaded(id));
+      }
+      notifyListeners();
+    });
+
+    _outgoingRequestsSub?.cancel();
+    _outgoingRequestsSub = FirebaseFirestore.instance
+        .collection('friendRequests')
+        .where('fromUserId', isEqualTo: currentUserId)
+        .snapshots()
+        .listen((snapshot) {
+      _outgoingRequestToIds
+        ..clear()
+        ..addAll(snapshot.docs.map((d) => d['toUserId'] as String));
+      notifyListeners();
+    });
+
+    // Реални нотификации (like/comment/friendRequest/friendAccept) —
+    // запишани од Cloud Functions во `notifications` колекцијата.
+    _notificationsSub?.cancel();
+    _notificationsSub = FirebaseFirestore.instance
+        .collection('notifications')
+        .where('recipientId', isEqualTo: currentUserId)
+        .snapshots()
+        .listen((snapshot) {
+      _firestoreNotifications
+        ..clear()
+        ..addAll(snapshot.docs.map(NotificationItem.fromFirestore));
+      for (final n in _firestoreNotifications) {
+        unawaited(_ensureUserLoaded(n.actorId));
+      }
+      notifyListeners();
+    });
+  }
+
+  void _stopListeningToCurrentUser() {
+    _currentUserDocSub?.cancel();
+    _incomingRequestsSub?.cancel();
+    _outgoingRequestsSub?.cancel();
+    _notificationsSub?.cancel();
+    _currentUserDocSub = null;
+    _incomingRequestsSub = null;
+    _outgoingRequestsSub = null;
+    _notificationsSub = null;
+    _incomingRequestFromIds.clear();
+    _outgoingRequestToIds.clear();
+    _firestoreNotifications.clear();
+  }
+
   List<AppUser> friendsOf(String userId) {
-    final ids = _friends[userId] ?? <String>{};
-    return ids.map(userById).toList();
+    return userById(userId).friendIds.map(userById).toList();
+  }
+
+  /// Ги вчитува во `_users` (ако не се веќе таму) сите пријатели на `userId`,
+  /// за нивните имиња/username да се прикажат правилно во `FriendsListScreen`
+  /// наместо placeholder "Корисник".
+  Future<void> ensureFriendsLoaded(String userId) async {
+    final ids = userById(userId).friendIds;
+    for (final id in ids) {
+      await _ensureUserLoaded(id);
+    }
+    notifyListeners();
   }
 
   List<AppUser> incomingRequestUsers() {
-    if (currentUserId == null) return [];
-    final ids = _incomingRequests[currentUserId!] ?? <String>{};
-    return ids.map(userById).toList();
+    return _incomingRequestFromIds.map(userById).toList();
   }
 
   RelationshipStatus relationshipWith(String otherUserId) {
     if (currentUserId == null) return RelationshipStatus.none;
-    if (_friends[currentUserId!]?.contains(otherUserId) ?? false) {
+    if (currentUser!.friendIds.contains(otherUserId)) {
       return RelationshipStatus.friends;
     }
-    if (_incomingRequests[currentUserId!]?.contains(otherUserId) ?? false) {
+    if (_incomingRequestFromIds.contains(otherUserId)) {
       return RelationshipStatus.requestReceived;
     }
-    if (_incomingRequests[otherUserId]?.contains(currentUserId!) ?? false) {
+    if (_outgoingRequestToIds.contains(otherUserId)) {
       return RelationshipStatus.requestSent;
     }
     return RelationshipStatus.none;
   }
 
-  void sendFriendRequest(String targetUserId) {
+  /// Испраќа барање за пријателство преку Cloud Function (`sendFriendRequest`)
+  /// — таа атомски проверува дека не постои веќе пријателство/барање во која
+  /// било насока. UI состојбата се освежува преку `_incomingRequestsSub` /
+  /// `_outgoingRequestsSub`, не рачно овде.
+  Future<void> sendFriendRequest(String targetUserId) async {
     if (currentUserId == null) return;
-    _incomingRequests.putIfAbsent(targetUserId, () => <String>{});
-    _incomingRequests[targetUserId]!.add(currentUserId!);
-    _addNotification(
-      forUserId: targetUserId,
-      type: NotificationType.friendRequest,
-      actorId: currentUserId!,
-    );
-    notifyListeners();
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('sendFriendRequest')
+          .call(<String, dynamic>{'toUserId': targetUserId});
+    } catch (_) {
+      // Слушателите на снапшот сепак ја одразуваат вистинската состојба.
+    }
   }
 
-  void cancelFriendRequest(String targetUserId) {
+  Future<void> cancelFriendRequest(String targetUserId) async {
     if (currentUserId == null) return;
-    _incomingRequests[targetUserId]?.remove(currentUserId!);
-    notifyListeners();
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('cancelFriendRequest')
+          .call(<String, dynamic>{'toUserId': targetUserId});
+    } catch (_) {}
   }
 
-  void acceptFriendRequest(String requesterId) {
+  /// Прифаќа барање за пријателство преку Cloud Function
+  /// (`acceptFriendRequest`) — атомски ги ажурира `friendIds` на двата
+  /// корисника, што со обичен клиентски запис не е безбедно изводливо.
+  Future<void> acceptFriendRequest(String requesterId) async {
     if (currentUserId == null) return;
-    _incomingRequests[currentUserId!]?.remove(requesterId);
-    _friends.putIfAbsent(currentUserId!, () => <String>{}).add(requesterId);
-    _friends.putIfAbsent(requesterId, () => <String>{}).add(currentUserId!);
-    _addNotification(
-      forUserId: requesterId,
-      type: NotificationType.friendAccept,
-      actorId: currentUserId!,
-    );
-    notifyListeners();
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('acceptFriendRequest')
+          .call(<String, dynamic>{'fromUserId': requesterId});
+    } catch (_) {}
   }
 
-  void declineFriendRequest(String requesterId) {
+  Future<void> declineFriendRequest(String requesterId) async {
     if (currentUserId == null) return;
-    _incomingRequests[currentUserId!]?.remove(requesterId);
-    notifyListeners();
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('declineFriendRequest')
+          .call(<String, dynamic>{'fromUserId': requesterId});
+    } catch (_) {}
+  }
+
+  Future<void> unfriend(String otherUserId) async {
+    if (currentUserId == null) return;
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('unfriend')
+          .call(<String, dynamic>{'otherUserId': otherUserId});
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------
   // Posts / feed
   // ---------------------------------------------------------------------
 
-  List<Post> get feedPosts {
-    final sorted = [..._posts];
-    sorted.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return sorted;
-  }
-
-  List<Post> postsByUser(String userId) {
-    return feedPosts.where((p) => p.authorId == userId).toList();
+  /// Директно вчитување на објавите на еден корисник (за `ProfileScreen`/
+  /// `UserProfileScreen`), наместо потпирање на веќе-испагинираниот главен
+  /// feed. Firestore правилата бараат `isSelfOrFriend(authorId)` — ако не сме
+  /// пријатели, барањето паѓа со permission-denied и враќаме празна листа.
+  /// Резултатите се спојуваат во `_firestorePosts` за `postById` (користен од
+  /// `PostDetailScreen`) секогаш да може да ги најде, без разлика дали
+  /// објавата дошла преку главниот feed или преку профил.
+  Future<List<Post>> fetchPostsForUser(String userId) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('posts')
+          .where('authorId', isEqualTo: userId)
+          .orderBy('createdAt', descending: true)
+          .get();
+      final posts = <Post>[];
+      for (final doc in snapshot.docs) {
+        try {
+          posts.add(Post.fromFirestore(doc));
+        } catch (_) {
+          // Skip malformed post docs so one bad document can't sink the list.
+        }
+      }
+      for (final post in posts) {
+        final idx = _firestorePosts.indexWhere((p) => p.id == post.id);
+        if (idx == -1) {
+          _firestorePosts.add(post);
+        } else {
+          _firestorePosts[idx] = post;
+        }
+      }
+      notifyListeners();
+      return posts;
+    } catch (_) {
+      return [];
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -376,14 +567,26 @@ class MockDataStore extends ChangeNotifier {
       _feedError = null;
     }
     if (!_hasMoreFeed) return;
+    if (currentUserId == null) return;
 
     _feedLoading = true;
     _feedError = null;
     notifyListeners();
 
     try {
+      // Posts are only readable by their author's friends (see
+      // firestore.rules) — Firestore rejects an unconstrained query outright
+      // rather than silently filtering it, so the feed must be scoped
+      // client-side via `authorId in [...]`. `whereIn` caps at 30 values;
+      // for now only the first 30 friends (by array order) are included.
+      final authorIds = <String>[
+        currentUserId!,
+        ...currentUser!.friendIds.take(29),
+      ];
+
       var query = FirebaseFirestore.instance
           .collection('posts')
+          .where('authorId', whereIn: authorIds)
           .orderBy('createdAt', descending: true)
           .limit(_pageSize);
 
@@ -435,6 +638,7 @@ class MockDataStore extends ChangeNotifier {
           username: d['username'] as String? ?? userId,
           email: d['email'] as String? ?? '',
           bio: d['bio'] as String? ?? '',
+          friendIds: List<String>.from(d['friendIds'] as List? ?? []),
         ));
       }
     } catch (_) {}
@@ -572,8 +776,10 @@ class MockDataStore extends ChangeNotifier {
 
   List<NotificationItem> get notificationsForCurrentUser {
     if (currentUserId == null) return [];
-    final list =
-        _notifications.where((n) => n.recipientId == currentUserId).toList();
+    final list = [
+      ..._notifications.where((n) => n.recipientId == currentUserId),
+      ..._firestoreNotifications,
+    ];
     list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return list;
   }
@@ -582,6 +788,16 @@ class MockDataStore extends ChangeNotifier {
       notificationsForCurrentUser.where((n) => !n.read).length;
 
   void markNotificationRead(String id) {
+    final remote = _firestoreNotifications.where((n) => n.id == id);
+    if (remote.isNotEmpty) {
+      remote.first.read = true;
+      unawaited(FirebaseFirestore.instance
+          .collection('notifications')
+          .doc(id)
+          .update({'read': true}));
+      notifyListeners();
+      return;
+    }
     final n = _notifications.firstWhere((n) => n.id == id);
     n.read = true;
     notifyListeners();
@@ -589,7 +805,14 @@ class MockDataStore extends ChangeNotifier {
 
   void markAllNotificationsRead() {
     for (final n in notificationsForCurrentUser) {
+      if (n.read) continue;
       n.read = true;
+      if (_firestoreNotifications.contains(n)) {
+        unawaited(FirebaseFirestore.instance
+            .collection('notifications')
+            .doc(n.id)
+            .update({'read': true}));
+      }
     }
     notifyListeners();
   }
@@ -651,10 +874,12 @@ class MockDataStore extends ChangeNotifier {
       _passwordsByEmail[u.email] = 'demo123';
     }
 
-    _friends[marija.id] = {igor.id};
-    _friends[igor.id] = {marija.id};
+    marija.friendIds.add(igor.id);
+    igor.friendIds.add(marija.id);
 
-    _incomingRequests[marija.id] = {ana.id}; // Ана сака да се спријателат
+    // Демо-корисникот е секогаш marija (loginAsDemoUser), па директно
+    // сеедуваме "нерешено" барање наместо преку Firestore listener.
+    _incomingRequestFromIds.add(ana.id); // Ана сака да се спријателат
 
     final now = DateTime.now();
 

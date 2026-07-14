@@ -17,12 +17,14 @@ class PostCard extends StatelessWidget {
   final Post post;
   final VoidCallback onTap;
   final VoidCallback onLikeTap;
+  final VoidCallback? onAuthorTap;
 
   const PostCard({
     super.key,
     required this.post,
     required this.onTap,
     required this.onLikeTap,
+    this.onAuthorTap,
   });
 
   @override
@@ -42,17 +44,24 @@ class PostCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  UserAvatar(user: author, radius: 18),
-                  const SizedBox(width: AppSpacing.sm),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                  InkWell(
+                    borderRadius: BorderRadius.circular(AppSpacing.radiusMd),
+                    onTap: onAuthorTap,
+                    child: Row(
                       children: [
-                        Text(author.name, style: AppTypography.titleSmall),
-                        Text(timeAgo(post.createdAt), style: AppTypography.caption),
+                        UserAvatar(user: author, radius: 18),
+                        const SizedBox(width: AppSpacing.sm),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(author.name, style: AppTypography.titleSmall),
+                            Text(timeAgo(post.createdAt), style: AppTypography.caption),
+                          ],
+                        ),
                       ],
                     ),
                   ),
+                  const Spacer(),
                   PostTypeBadge(type: post.type),
                 ],
               ),

@@ -33,7 +33,7 @@ class UserListTile extends StatelessWidget {
                 ],
               ),
             ),
-            trailing,
+            Flexible(child: trailing),
           ],
         ),
       ),

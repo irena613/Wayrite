@@ -2,43 +2,138 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper: is the caller authenticated?
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
     function isAuth() {
       return request.auth != null;
     }
 
-    // Helper: is the caller the owner of the document being written?
-    function isOwner(field) {
-      return request.resource.data[field] == request.auth.uid;
+    function isSelf(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    // Denormalized friendIds array on the user doc, maintained only by
+    // Cloud Functions (see acceptFriendRequest/unfriend). Missing field
+    // treated as no friends rather than an error.
+    function friendIdsOf(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data.get('friendIds', []);
+    }
+
+    function isFriend(otherUid) {
+      return isAuth() && friendIdsOf(request.auth.uid).hasAny([otherUid]);
+    }
+
+    function isSelfOrFriend(uid) {
+      return isSelf(uid) || isFriend(uid);
+    }
+
+    function onlyChangedKeys(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
     }
 
     // ── Users ──────────────────────────────────────────────────────────────
-    // Any authenticated user can read profiles (needed for search & feed).
-    // Only the user themselves can write their own document.
+    // Any authenticated user can read profiles (search, feed authors, profile
+    // screen). Only the owner can write their own doc, and never directly to
+    // friendIds/fcmTokens — those are maintained by Cloud Functions via the
+    // Admin SDK (which bypasses these rules entirely).
     match /users/{userId} {
       allow read: if isAuth();
-      allow write: if isAuth() && request.auth.uid == userId;
+
+      allow create: if isSelf(userId)
+        && request.resource.data.get('friendIds', []).size() == 0
+        && request.resource.data.get('fcmTokens', []).size() == 0;
+
+      allow update: if isSelf(userId)
+        && request.resource.data.get('friendIds', []) == resource.data.get('friendIds', [])
+        && request.resource.data.get('fcmTokens', []) == resource.data.get('fcmTokens', []);
+    }
+
+    // ── Friend requests ──────────────────────────────────────────────────────
+    // Doc id is `${fromUserId}_${toUserId}`. All writes (send/accept/decline/
+    // cancel) go through Cloud Functions so the mutual friendIds update stays
+    // atomic and consistent — clients only ever read their own requests.
+    match /friendRequests/{requestId} {
+      allow read: if isAuth()
+        && (resource.data.fromUserId == request.auth.uid
+            || resource.data.toUserId == request.auth.uid);
+      allow write: if false;
     }
 
     // ── Posts ──────────────────────────────────────────────────────────────
-    // Any authenticated user can read posts.
-    // Only the author can create or delete a post.
-    // Any authenticated user can update a post (needed for likedBy /
-    // commentIds array updates by other users).
+    // Readable only by the author and their friends. NOTE: for list queries
+    // Firestore rejects the whole query unless every document it could
+    // possibly return satisfies this rule — the client must constrain feed
+    // queries with `where('authorId', 'in', friendIds + [self])` (chunked to
+    // 30 ids) rather than querying the whole collection.
     match /posts/{postId} {
-      allow read: if isAuth();
-      allow create: if isAuth() && isOwner("authorId");
-      allow update: if isAuth();
+      allow read: if isAuth() && isSelfOrFriend(resource.data.authorId);
+
+      allow create: if isAuth()
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.type in ['achievement', 'quit']
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 500
+        && request.resource.data.startDate is timestamp
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.get('likedBy', []) == []
+        && request.resource.data.get('commentIds', []) == [];
+
+      // Two distinct, mutually exclusive kinds of update:
+      //  (a) the author edits their own title/description/dates
+      //  (b) the author or a friend toggles exactly their own uid in likedBy
+      allow update: if isAuth() && (
+        (
+          resource.data.authorId == request.auth.uid
+          && onlyChangedKeys(['title', 'description', 'startDate', 'endDate'])
+          && request.resource.data.title is string
+          && request.resource.data.title.size() > 0
+          && request.resource.data.title.size() <= 100
+          && request.resource.data.description is string
+          && request.resource.data.description.size() <= 500
+        )
+        || (
+          isSelfOrFriend(resource.data.authorId)
+          && onlyChangedKeys(['likedBy'])
+          && (
+            (
+              request.resource.data.likedBy.size() == resource.data.likedBy.size() + 1
+              && request.resource.data.likedBy.hasAll(resource.data.likedBy)
+              && request.resource.data.likedBy.hasAny([request.auth.uid])
+              && !resource.data.likedBy.hasAny([request.auth.uid])
+            )
+            || (
+              resource.data.likedBy.size() == request.resource.data.likedBy.size() + 1
+              && resource.data.likedBy.hasAll(request.resource.data.likedBy)
+              && resource.data.likedBy.hasAny([request.auth.uid])
+              && !request.resource.data.likedBy.hasAny([request.auth.uid])
+            )
+          )
+        )
+      );
+
       allow delete: if isAuth() && resource.data.authorId == request.auth.uid;
 
       // ── Comments (subcollection) ────────────────────────────────────────
-      // Any authenticated user can read and create comments.
-      // Only the comment author can delete their own comment.
+      // Readable/writable only by the post's author and their friends.
+      // Queries here are always scoped to one postId, so the get() below
+      // is constant across the whole result set and doesn't trip the
+      // list-query rejection issue that top-level `posts` queries have.
       match /comments/{commentId} {
-        allow read: if isAuth();
-        allow create: if isAuth() && isOwner("authorId");
-        allow delete: if isAuth()
-          && resource.data.authorId == request.auth.uid;
+        allow read: if isAuth()
+          && isSelfOrFriend(get(/databases/$(database)/documents/posts/$(postId)).data.authorId);
+
+        allow create: if isAuth()
+          && request.resource.data.authorId == request.auth.uid
+          && isSelfOrFriend(get(/databases/$(database)/documents/posts/$(postId)).data.authorId)
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500
+          && request.resource.data.createdAt is timestamp;
+
+        allow delete: if isAuth() && resource.data.authorId == request.auth.uid;
       }
     }
 

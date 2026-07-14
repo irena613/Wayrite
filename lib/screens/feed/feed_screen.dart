@@ -5,6 +5,7 @@ import '../../core/widgets/empty_state.dart';
 import '../../core/widgets/post_card.dart';
 import '../../data/app_store.dart';
 import '../post/post_detail_screen.dart';
+import '../profile/user_profile_screen.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -44,7 +45,16 @@ class _FeedScreenState extends State<FeedScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Тимски')),
+      appBar: AppBar(
+        title: const Text('Тимски'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Освежи',
+            onPressed: () => appStore.loadFeed(refresh: true),
+          ),
+        ],
+      ),
       body: ListenableBuilder(
         listenable: appStore,
         builder: (context, _) {
@@ -123,6 +133,9 @@ class _FeedScreenState extends State<FeedScreen> {
                         builder: (_) => PostDetailScreen(postId: post.id)),
                   ),
                   onLikeTap: () => appStore.toggleLike(post.id),
+                  onAuthorTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => UserProfileScreen(userId: post.authorId)),
+                  ),
                 );
               },
             ),

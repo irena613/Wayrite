@@ -3,28 +3,30 @@ import '../../core/theme/app_icons.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/app_typography.dart';
 import '../../core/widgets/empty_state.dart';
+import '../../core/widgets/friend_action_button.dart';
 import '../../core/widgets/post_card.dart';
 import '../../core/widgets/user_avatar.dart';
 import '../../data/app_store.dart';
 import '../../models/post.dart';
-import '../auth/login_screen.dart';
+import '../../models/relationship_status.dart';
 import '../post/post_detail_screen.dart';
-import 'edit_profile_screen.dart';
 import 'friends_list_screen.dart';
 
-/// Екран за кориснички профил — преглед на лични податоци + сопствени објави.
+/// Профил на друг корисник (не тековниот најавен) — податоци + објави,
+/// видливи само ако сме пријатели (согласно Firestore правилата).
 ///
-/// UI flow: Profile -> "Уреди профил" -> EditProfileScreen -> (зачувај) -> Profile
-///          Profile -> тап на објава -> PostDetailScreen
-///          Profile -> "Одјави се" -> LoginScreen
-class ProfileScreen extends StatefulWidget {
-  const ProfileScreen({super.key});
+/// UI flow: Search/FriendsList -> тап на ред -> UserProfileScreen
+///          UserProfileScreen -> "Пријатели" -> FriendsListScreen
+class UserProfileScreen extends StatefulWidget {
+  final String userId;
+
+  const UserProfileScreen({super.key, required this.userId});
 
   @override
-  State<ProfileScreen> createState() => _ProfileScreenState();
+  State<UserProfileScreen> createState() => _UserProfileScreenState();
 }
 
-class _ProfileScreenState extends State<ProfileScreen> {
+class _UserProfileScreenState extends State<UserProfileScreen> {
   List<Post>? _posts;
 
   @override
@@ -33,11 +35,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _loadPosts();
   }
 
+  @override
+  void didUpdateWidget(covariant UserProfileScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.userId != widget.userId) _loadPosts();
+  }
+
   Future<void> _loadPosts() async {
-    final userId = appStore.currentUserId;
-    if (userId == null) return;
     setState(() => _posts = null);
-    final posts = await appStore.fetchPostsForUser(userId);
+    final isSelf = widget.userId == appStore.currentUserId;
+    final isFriend =
+        appStore.relationshipWith(widget.userId) == RelationshipStatus.friends;
+    if (!isSelf && !isFriend) {
+      setState(() => _posts = []);
+      return;
+    }
+    final posts = await appStore.fetchPostsForUser(widget.userId);
     if (!mounted) return;
     setState(() => _posts = posts);
   }
@@ -47,34 +60,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return ListenableBuilder(
       listenable: appStore,
       builder: (context, _) {
-        final user = appStore.currentUser;
-        if (user == null) return const SizedBox.shrink();
+        final user = appStore.userById(widget.userId);
+        final isSelf = widget.userId == appStore.currentUserId;
+        final isFriend =
+            appStore.relationshipWith(widget.userId) == RelationshipStatus.friends;
+        final friendsCount = appStore.friendsOf(widget.userId).length;
         final posts = _posts;
-        final friendsCount = appStore.friendsOf(user.id).length;
 
         return Scaffold(
-          appBar: AppBar(
-            title: const Text('Профил'),
-            actions: [
-              IconButton(
-                tooltip: 'Освежи',
-                icon: const Icon(Icons.refresh),
-                onPressed: _loadPosts,
-              ),
-              IconButton(
-                tooltip: 'Одјави се',
-                icon: const Icon(AppIcons.logout),
-                onPressed: () async {
-                  await appStore.logout();
-                  if (!context.mounted) return;
-                  Navigator.of(context).pushAndRemoveUntil(
-                    MaterialPageRoute(builder: (_) => const LoginScreen()),
-                    (route) => false,
-                  );
-                },
-              ),
-            ],
-          ),
+          appBar: AppBar(title: Text(user.name)),
           body: ListView(
             padding: const EdgeInsets.all(AppSpacing.lg),
             children: [
@@ -102,39 +96,40 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         InkWell(
                           onTap: () => Navigator.of(context).push(
                             MaterialPageRoute(
-                              builder: (_) => FriendsListScreen(userId: user.id),
+                              builder: (_) => FriendsListScreen(userId: widget.userId),
                             ),
                           ),
                           child: _StatBlock(label: 'Пријатели', value: friendsCount),
                         ),
                       ],
                     ),
-                    const SizedBox(height: AppSpacing.lg),
-                    OutlinedButton.icon(
-                      icon: const Icon(AppIcons.edit, size: 18),
-                      label: const Text('Уреди профил'),
-                      onPressed: () => Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const EditProfileScreen()),
-                      ),
-                    ),
+                    if (!isSelf) ...[
+                      const SizedBox(height: AppSpacing.lg),
+                      FriendActionButton(userId: widget.userId),
+                    ],
                   ],
                 ),
               ),
               const SizedBox(height: AppSpacing.xl),
               const Divider(),
               const SizedBox(height: AppSpacing.md),
-              Text('Мои објави', style: AppTypography.titleMedium),
+              Text('Објави', style: AppTypography.titleMedium),
               const SizedBox(height: AppSpacing.md),
               if (posts == null)
                 const Padding(
                   padding: EdgeInsets.only(top: AppSpacing.xl),
                   child: Center(child: CircularProgressIndicator()),
                 )
+              else if (!isSelf && !isFriend)
+                const EmptyState(
+                  icon: AppIcons.friends,
+                  title: 'Само пријателите можат да ги видат објавите',
+                  subtitle: 'Стани пријател за да видиш што споделил/а.',
+                )
               else if (posts.isEmpty)
                 const EmptyState(
                   icon: AppIcons.feed,
-                  title: 'Сè уште немаш објави',
-                  subtitle: 'Сподели го твоето прво постигнување или откажување.',
+                  title: 'Сè уште нема објави',
                 )
               else
                 ...posts.map(

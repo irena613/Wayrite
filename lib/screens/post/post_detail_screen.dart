@@ -11,6 +11,7 @@ import '../../core/widgets/post_type_badge.dart';
 import '../../core/widgets/user_avatar.dart';
 import '../../data/app_store.dart';
 import '../../models/post.dart';
+import '../profile/user_profile_screen.dart';
 
 String _dayLabel(int days) => days == 1 ? 'ден' : 'дена';
 
@@ -69,17 +70,27 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                   children: [
                     Row(
                       children: [
-                        UserAvatar(user: author, radius: 20),
-                        const SizedBox(width: AppSpacing.sm),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                        InkWell(
+                          borderRadius: BorderRadius.circular(AppSpacing.radiusMd),
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => UserProfileScreen(userId: post.authorId)),
+                          ),
+                          child: Row(
                             children: [
-                              Text(author.name, style: AppTypography.titleSmall),
-                              Text(timeAgo(post.createdAt), style: AppTypography.caption),
+                              UserAvatar(user: author, radius: 20),
+                              const SizedBox(width: AppSpacing.sm),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(author.name, style: AppTypography.titleSmall),
+                                  Text(timeAgo(post.createdAt), style: AppTypography.caption),
+                                ],
+                              ),
                             ],
                           ),
                         ),
+                        const Spacer(),
                         PostTypeBadge(type: post.type),
                       ],
                     ),

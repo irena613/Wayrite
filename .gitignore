@@ -52,3 +52,6 @@ app.*.map.json
 /ios/Runner/GoogleService-Info.plist
 lib/firebase_options.dart
 DEV_SESSION_STATE.md
+
+# Local Firebase Emulator Suite data export (test accounts/posts, not for git)
+/emulator-data/

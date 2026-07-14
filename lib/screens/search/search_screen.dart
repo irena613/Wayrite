@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
-import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_icons.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/app_typography.dart';
 import '../../core/widgets/empty_state.dart';
+import '../../core/widgets/friend_action_button.dart';
 import '../../core/widgets/user_list_tile.dart';
 import '../../data/app_store.dart';
-import '../../models/relationship_status.dart';
+import '../profile/user_profile_screen.dart';
 
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
@@ -62,20 +62,9 @@ class _SearchScreenState extends State<SearchScreen> {
                           (u) => UserListTile(
                             key: ValueKey('req_${u.id}'),
                             user: u,
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  tooltip: 'Прифати',
-                                  icon: const Icon(AppIcons.friendAccept, color: AppColors.success),
-                                  onPressed: () => appStore.acceptFriendRequest(u.id),
-                                ),
-                                IconButton(
-                                  tooltip: 'Одбиј',
-                                  icon: const Icon(AppIcons.friendDecline, color: AppColors.error),
-                                  onPressed: () => appStore.declineFriendRequest(u.id),
-                                ),
-                              ],
+                            trailing: FriendActionButton(userId: u.id),
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute(builder: (_) => UserProfileScreen(userId: u.id)),
                             ),
                           ),
                         ),
@@ -101,7 +90,10 @@ class _SearchScreenState extends State<SearchScreen> {
                         (u) => UserListTile(
                           key: ValueKey(u.id),
                           user: u,
-                          trailing: _actionFor(u.id),
+                          trailing: FriendActionButton(userId: u.id),
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(builder: (_) => UserProfileScreen(userId: u.id)),
+                          ),
                         ),
                       ),
                     const SizedBox(height: AppSpacing.xl),
@@ -113,44 +105,5 @@ class _SearchScreenState extends State<SearchScreen> {
         ],
       ),
     );
-  }
-
-  Widget _actionFor(String userId) {
-    final status = appStore.relationshipWith(userId);
-    switch (status) {
-      case RelationshipStatus.none:
-        return OutlinedButton.icon(
-          icon: const Icon(AppIcons.friendAdd, size: 16),
-          label: const Text('Додај'),
-          onPressed: () => appStore.sendFriendRequest(userId),
-        );
-      case RelationshipStatus.requestSent:
-        return OutlinedButton.icon(
-          icon: const Icon(AppIcons.friendPending, size: 16),
-          label: const Text('Чека'),
-          onPressed: () => appStore.cancelFriendRequest(userId),
-        );
-      case RelationshipStatus.requestReceived:
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              tooltip: 'Прифати',
-              icon: const Icon(AppIcons.friendAccept, color: AppColors.success),
-              onPressed: () => appStore.acceptFriendRequest(userId),
-            ),
-            IconButton(
-              tooltip: 'Одбиј',
-              icon: const Icon(AppIcons.friendDecline, color: AppColors.error),
-              onPressed: () => appStore.declineFriendRequest(userId),
-            ),
-          ],
-        );
-      case RelationshipStatus.friends:
-        return const Chip(
-          avatar: Icon(AppIcons.friends, size: 16, color: AppColors.primaryDark),
-          label: Text('Пријатели'),
-        );
-    }
   }
 }

@@ -9,6 +9,7 @@ class AppUser {
   String username;
   String email;
   String bio;
+  List<String> friendIds;
 
   AppUser({
     required this.id,
@@ -16,15 +17,23 @@ class AppUser {
     required this.username,
     required this.email,
     this.bio = '',
-  });
+    List<String>? friendIds,
+  }) : friendIds = friendIds ?? [];
 
-  AppUser copyWith({String? name, String? username, String? email, String? bio}) {
+  AppUser copyWith({
+    String? name,
+    String? username,
+    String? email,
+    String? bio,
+    List<String>? friendIds,
+  }) {
     return AppUser(
       id: id,
       name: name ?? this.name,
       username: username ?? this.username,
       email: email ?? this.email,
       bio: bio ?? this.bio,
+      friendIds: friendIds ?? this.friendIds,
     );
   }
 }

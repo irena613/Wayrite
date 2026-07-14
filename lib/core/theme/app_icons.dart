@@ -25,6 +25,7 @@ class AppIcons {
   static const IconData friendAccept = Icons.check_circle_outline;
   static const IconData friendDecline = Icons.close_rounded;
   static const IconData friends = Icons.people_alt_outlined;
+  static const IconData friendRemove = Icons.person_remove_alt_1_outlined;
 
   static const IconData calendar = Icons.calendar_today_outlined;
   static const IconData edit = Icons.edit_outlined;

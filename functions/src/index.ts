@@ -99,9 +99,9 @@ export const unregisterFcmToken = onCall(async (request) => {
 
 async function sendPushNotification(params: {
   recipientId: string;
-  type: "like" | "comment";
+  type: "like" | "comment" | "friendRequest" | "friendAccept";
   actorId: string;
-  postId: string;
+  postId?: string;
   title: string;
   body: string;
 }): Promise<void> {
@@ -113,7 +113,7 @@ async function sendPushNotification(params: {
       recipientId,
       type,
       actorId,
-      postId,
+      ...(postId ? {postId} : {}),
       read: false,
       createdAt: Timestamp.now(),
     });
@@ -148,7 +148,7 @@ async function sendPushNotification(params: {
     const response = await messaging.sendEachForMulticast({
       tokens,
       notification: {title, body},
-      data: {type, postId, actorId},
+      data: {type, actorId, ...(postId ? {postId} : {})},
     });
     logger.info("sendPush: FCM sent", {
       recipientId,
@@ -490,3 +490,292 @@ export const recalcStreak = onDocumentUpdated(
     }
   }
 );
+
+// ---------------------------------------------------------------------------
+// TASK 6 — Friend Requests & Friendships
+// ---------------------------------------------------------------------------
+//
+// friendRequests/{fromUserId}_{toUserId} — pending requests only; the doc is
+// deleted on accept/decline/cancel. Accepting/unfriending touches both
+// users' `friendIds` array, so those mutations run here (Admin SDK bypasses
+// Firestore rules) instead of as direct client writes.
+
+function friendRequestDocId(fromUserId: string, toUserId: string): string {
+  return `${fromUserId}_${toUserId}`;
+}
+
+/**
+ * Испраќа барање за пријателство. Атомски проверува дека не постои веќе
+ * пријателство или барање (во која било насока) помеѓу двата корисника.
+ */
+export const sendFriendRequest = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Мора да сте најавени.");
+  }
+
+  const data = request.data as Record<string, unknown>;
+  const toUserId = data?.toUserId;
+  if (!toUserId || typeof toUserId !== "string" || toUserId.trim() === "") {
+    throw new HttpsError("invalid-argument", "Мора да се наведе корисник.");
+  }
+  if (toUserId === uid) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Не можете да си испратите барање сами на себе."
+    );
+  }
+
+  logger.info("sendFriendRequest: started", {uid, toUserId});
+
+  const fromRef = db.collection("users").doc(uid);
+  const toRef = db.collection("users").doc(toUserId);
+  const forwardRef = db.collection("friendRequests")
+    .doc(friendRequestDocId(uid, toUserId));
+  const reverseRef = db.collection("friendRequests")
+    .doc(friendRequestDocId(toUserId, uid));
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const [fromSnap, toSnap, forwardSnap, reverseSnap] = await Promise.all([
+        tx.get(fromRef),
+        tx.get(toRef),
+        tx.get(forwardRef),
+        tx.get(reverseRef),
+      ]);
+
+      if (!toSnap.exists) {
+        throw new HttpsError("not-found", "Корисникот не постои.");
+      }
+      const friendIds = (fromSnap.data()?.friendIds as string[]) ?? [];
+      if (friendIds.includes(toUserId)) {
+        throw new HttpsError("already-exists", "Веќе сте пријатели.");
+      }
+      if (forwardSnap.exists) {
+        throw new HttpsError("already-exists", "Барањето е веќе испратено.");
+      }
+      if (reverseSnap.exists) {
+        throw new HttpsError(
+          "already-exists",
+          "Тој корисник веќе ви испратил барање — прифатете го наместо тоа."
+        );
+      }
+
+      tx.set(forwardRef, {
+        fromUserId: uid,
+        toUserId,
+        createdAt: Timestamp.now(),
+      });
+    });
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    logger.error("sendFriendRequest: failed", {
+      uid,
+      toUserId,
+      error: (e as Error).message,
+    });
+    throw new HttpsError("internal", "Неуспешно испраќање на барањето.");
+  }
+
+  let actorName = "Некој";
+  try {
+    const fromDoc = await fromRef.get();
+    actorName = (fromDoc.data()?.name as string) ?? "Некој";
+  } catch (_) {
+    // actor name is best-effort
+  }
+
+  await sendPushNotification({
+    recipientId: toUserId,
+    type: "friendRequest",
+    actorId: uid,
+    title: actorName,
+    body: "ви испрати барање за пријателство",
+  });
+
+  logger.info("sendFriendRequest: success", {uid, toUserId});
+  return {success: true};
+});
+
+/**
+ * Откажува барање што самиот корисник го испратил.
+ */
+export const cancelFriendRequest = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Мора да сте најавени.");
+  }
+  const data = request.data as Record<string, unknown>;
+  const toUserId = data?.toUserId;
+  if (!toUserId || typeof toUserId !== "string" || toUserId.trim() === "") {
+    throw new HttpsError("invalid-argument", "Мора да се наведе корисник.");
+  }
+
+  const requestRef = db.collection("friendRequests")
+    .doc(friendRequestDocId(uid, toUserId));
+  try {
+    const snap = await requestRef.get();
+    if (!snap.exists) {
+      throw new HttpsError("not-found", "Барањето веќе не постои.");
+    }
+    await requestRef.delete();
+    logger.info("cancelFriendRequest: success", {uid, toUserId});
+    return {success: true};
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    logger.error("cancelFriendRequest: failed", {
+      uid,
+      toUserId,
+      error: (e as Error).message,
+    });
+    throw new HttpsError("internal", "Неуспешно откажување на барањето.");
+  }
+});
+
+/**
+ * Одбива барање за пријателство упатено до тековниот корисник.
+ */
+export const declineFriendRequest = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Мора да сте најавени.");
+  }
+  const data = request.data as Record<string, unknown>;
+  const fromUserId = data?.fromUserId;
+  if (
+    !fromUserId ||
+    typeof fromUserId !== "string" ||
+    fromUserId.trim() === ""
+  ) {
+    throw new HttpsError("invalid-argument", "Мора да се наведе корисник.");
+  }
+
+  const requestRef = db.collection("friendRequests")
+    .doc(friendRequestDocId(fromUserId, uid));
+  try {
+    const snap = await requestRef.get();
+    if (!snap.exists) {
+      throw new HttpsError("not-found", "Барањето веќе не постои.");
+    }
+    await requestRef.delete();
+    logger.info("declineFriendRequest: success", {uid, fromUserId});
+    return {success: true};
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    logger.error("declineFriendRequest: failed", {
+      uid,
+      fromUserId,
+      error: (e as Error).message,
+    });
+    throw new HttpsError("internal", "Неуспешно одбивање на барањето.");
+  }
+});
+
+/**
+ * Прифаќа барање за пријателство — атомски ги ажурира `friendIds` на двата
+ * корисника и го брише барањето.
+ */
+export const acceptFriendRequest = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Мора да сте најавени.");
+  }
+  const data = request.data as Record<string, unknown>;
+  const fromUserId = data?.fromUserId;
+  if (
+    !fromUserId ||
+    typeof fromUserId !== "string" ||
+    fromUserId.trim() === ""
+  ) {
+    throw new HttpsError("invalid-argument", "Мора да се наведе корисник.");
+  }
+
+  logger.info("acceptFriendRequest: started", {uid, fromUserId});
+
+  const requestRef = db.collection("friendRequests")
+    .doc(friendRequestDocId(fromUserId, uid));
+  const fromUserRef = db.collection("users").doc(fromUserId);
+  const toUserRef = db.collection("users").doc(uid);
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const reqSnap = await tx.get(requestRef);
+      if (!reqSnap.exists) {
+        throw new HttpsError("not-found", "Барањето веќе не постои.");
+      }
+      tx.update(fromUserRef, {friendIds: FieldValue.arrayUnion(uid)});
+      tx.update(toUserRef, {friendIds: FieldValue.arrayUnion(fromUserId)});
+      tx.delete(requestRef);
+    });
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    logger.error("acceptFriendRequest: failed", {
+      uid,
+      fromUserId,
+      error: (e as Error).message,
+    });
+    throw new HttpsError("internal", "Неуспешно прифаќање на барањето.");
+  }
+
+  let actorName = "Некој";
+  try {
+    const toDoc = await toUserRef.get();
+    actorName = (toDoc.data()?.name as string) ?? "Некој";
+  } catch (_) {
+    // actor name is best-effort
+  }
+
+  await sendPushNotification({
+    recipientId: fromUserId,
+    type: "friendAccept",
+    actorId: uid,
+    title: actorName,
+    body: "го прифати вашето барање за пријателство",
+  });
+
+  logger.info("acceptFriendRequest: success", {uid, fromUserId});
+  return {success: true};
+});
+
+/**
+ * Раскинува постоечко пријателство — отстранува секој корисник од
+ * `friendIds` листата на другиот.
+ */
+export const unfriend = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Мора да сте најавени.");
+  }
+  const data = request.data as Record<string, unknown>;
+  const otherUserId = data?.otherUserId;
+  if (
+    !otherUserId ||
+    typeof otherUserId !== "string" ||
+    otherUserId.trim() === ""
+  ) {
+    throw new HttpsError("invalid-argument", "Мора да се наведе корисник.");
+  }
+
+  logger.info("unfriend: started", {uid, otherUserId});
+
+  const batch = db.batch();
+  batch.update(db.collection("users").doc(uid), {
+    friendIds: FieldValue.arrayRemove(otherUserId),
+  });
+  batch.update(db.collection("users").doc(otherUserId), {
+    friendIds: FieldValue.arrayRemove(uid),
+  });
+
+  try {
+    await batch.commit();
+    logger.info("unfriend: success", {uid, otherUserId});
+    return {success: true};
+  } catch (e) {
+    logger.error("unfriend: failed", {
+      uid,
+      otherUserId,
+      error: (e as Error).message,
+    });
+    throw new HttpsError("internal", "Неуспешно бришење на пријателството.");
+  }
+});
