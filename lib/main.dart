@@ -13,7 +13,7 @@ import 'screens/home/home_shell.dart';
 // (Firestore + Auth + Functions, no real backend touched).
 // Use '10.0.2.2' for the Android emulator, or the PC's LAN IPv4 (ipconfig)
 // for a physical device. Leave false to talk to the deployed Firebase project.
-const _useEmulator = true;
+const _useEmulator = false;
 const _emulatorHost = '10.0.2.2';
 
 void main() async {

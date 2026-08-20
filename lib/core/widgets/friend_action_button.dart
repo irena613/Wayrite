@@ -3,6 +3,7 @@ import '../../data/app_store.dart';
 import '../../models/relationship_status.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_icons.dart';
+import '../theme/app_spacing.dart';
 
 /// Дизајн систем — копче/акција за пријателство спрема статусот на врската
 /// со дадениот корисник (Додај / Чека / Прифати+Одбиј / Пријатели). Издвоено
@@ -21,13 +22,13 @@ class FriendActionButton extends StatelessWidget {
         return OutlinedButton.icon(
           icon: const Icon(AppIcons.friendAdd, size: 16),
           label: const Text('Додај'),
-          onPressed: () => appStore.sendFriendRequest(userId),
+          onPressed: () => _run(context, appStore.sendFriendRequest(userId)),
         );
       case RelationshipStatus.requestSent:
         return OutlinedButton.icon(
           icon: const Icon(AppIcons.friendPending, size: 16),
           label: const Text('Чека'),
-          onPressed: () => appStore.cancelFriendRequest(userId),
+          onPressed: () => _run(context, appStore.cancelFriendRequest(userId)),
         );
       case RelationshipStatus.requestReceived:
         return Row(
@@ -36,12 +37,17 @@ class FriendActionButton extends StatelessWidget {
             IconButton(
               tooltip: 'Прифати',
               icon: const Icon(AppIcons.friendAccept, color: AppColors.success),
-              onPressed: () => appStore.acceptFriendRequest(userId),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              onPressed: () => _run(context, appStore.acceptFriendRequest(userId)),
             ),
+            const SizedBox(width: AppSpacing.xs),
             IconButton(
               tooltip: 'Одбиј',
               icon: const Icon(AppIcons.friendDecline, color: AppColors.error),
-              onPressed: () => appStore.declineFriendRequest(userId),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+              onPressed: () => _run(context, appStore.declineFriendRequest(userId)),
             ),
           ],
         );
@@ -73,8 +79,14 @@ class FriendActionButton extends StatelessWidget {
         ],
       ),
     );
-    if (confirmed == true) {
-      await appStore.unfriend(userId);
+    if (confirmed == true && context.mounted) {
+      await _run(context, appStore.unfriend(userId));
     }
+  }
+
+  Future<void> _run(BuildContext context, Future<String?> action) async {
+    final error = await action;
+    if (error == null || !context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
   }
 }

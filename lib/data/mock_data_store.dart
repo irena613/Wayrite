@@ -22,15 +22,9 @@ import '../models/relationship_status.dart';
 class MockDataStore extends ChangeNotifier {
   MockDataStore() {
     _seedDemoData();
-    // Слушај за освежување на FCM токенот (се случува ретко, но мора да
-    // се регистрира новиот и да се отстрани стариот).
-    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
-      if (_fcmToken != null && _fcmToken != newToken) {
-        _unregisterToken(_fcmToken!);
-      }
-      _registerToken(newToken);
-    });
   }
+
+  bool _tokenRefreshListenerAttached = false;
 
   @override
   void dispose() {
@@ -213,6 +207,21 @@ class MockDataStore extends ChangeNotifier {
   /// Бара дозвола за нотификации и го регистрира FCM токенот на уредот.
   Future<void> _initFcm() async {
     try {
+      // Слушај за освежување на FCM токенот (се случува ретко, но мора да
+      // се регистрира новиот и да се отстрани стариот). Закачено овде (не во
+      // конструкторот) за appStore да може безбедно да се конструира и пред
+      // Firebase.initializeApp() да заврши — конструкторот се повикува на
+      // првото читање на глобалниот `appStore`, кое може да се случи пред
+      // Firebase да е подготвен (пр. во тестови).
+      if (!_tokenRefreshListenerAttached) {
+        _tokenRefreshListenerAttached = true;
+        FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+          if (_fcmToken != null && _fcmToken != newToken) {
+            _unregisterToken(_fcmToken!);
+          }
+          _registerToken(newToken);
+        });
+      }
       final settings = await FirebaseMessaging.instance.requestPermission(
         alert: true,
         badge: true,
@@ -365,8 +374,12 @@ class MockDataStore extends ChangeNotifier {
       user.bio = d['bio'] as String? ?? user.bio;
       user.friendIds = List<String>.from(d['friendIds'] as List? ?? []);
       notifyListeners();
-    });
+    }, onError: (e) => debugPrint('currentUserDocSub error: $e'));
 
+    // Слушателите за barawa го чистат demo seed-от (пр. лажното барање од
+    // Ана) штом првиот снапшот пристигне. Ако снапшотот никогаш не пристигне
+    // (пр. permission-denied од Firestore правилата), тој seed останува
+    // засекогаш — затоа е важно грешките овде да не поминуваат тивко.
     _incomingRequestsSub?.cancel();
     _incomingRequestsSub = FirebaseFirestore.instance
         .collection('friendRequests')
@@ -380,7 +393,7 @@ class MockDataStore extends ChangeNotifier {
         unawaited(_ensureUserLoaded(id));
       }
       notifyListeners();
-    });
+    }, onError: (e) => debugPrint('incomingRequestsSub error: $e'));
 
     _outgoingRequestsSub?.cancel();
     _outgoingRequestsSub = FirebaseFirestore.instance
@@ -392,7 +405,7 @@ class MockDataStore extends ChangeNotifier {
         ..clear()
         ..addAll(snapshot.docs.map((d) => d['toUserId'] as String));
       notifyListeners();
-    });
+    }, onError: (e) => debugPrint('outgoingRequestsSub error: $e'));
 
     // Реални нотификации (like/comment/friendRequest/friendAccept) —
     // запишани од Cloud Functions во `notifications` колекцијата.
@@ -409,7 +422,7 @@ class MockDataStore extends ChangeNotifier {
         unawaited(_ensureUserLoaded(n.actorId));
       }
       notifyListeners();
-    });
+    }, onError: (e) => debugPrint('notificationsSub error: $e'));
   }
 
   void _stopListeningToCurrentUser() {
@@ -463,54 +476,79 @@ class MockDataStore extends ChangeNotifier {
   /// — таа атомски проверува дека не постои веќе пријателство/барање во која
   /// било насока. UI состојбата се освежува преку `_incomingRequestsSub` /
   /// `_outgoingRequestsSub`, не рачно овде.
-  Future<void> sendFriendRequest(String targetUserId) async {
-    if (currentUserId == null) return;
+  ///
+  /// Враќа порака за грешка на македонски ако повикот не успее, инаку null.
+  Future<String?> sendFriendRequest(String targetUserId) async {
+    if (currentUserId == null) return null;
     try {
       await FirebaseFunctions.instanceFor(region: 'europe-west1')
           .httpsCallable('sendFriendRequest')
           .call(<String, dynamic>{'toUserId': targetUserId});
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      return e.message ?? 'Се случи грешка. Обиди се повторно.';
     } catch (_) {
-      // Слушателите на снапшот сепак ја одразуваат вистинската состојба.
+      return 'Нема интернет конекција.';
     }
   }
 
-  Future<void> cancelFriendRequest(String targetUserId) async {
-    if (currentUserId == null) return;
+  Future<String?> cancelFriendRequest(String targetUserId) async {
+    if (currentUserId == null) return null;
     try {
       await FirebaseFunctions.instanceFor(region: 'europe-west1')
           .httpsCallable('cancelFriendRequest')
           .call(<String, dynamic>{'toUserId': targetUserId});
-    } catch (_) {}
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      return e.message ?? 'Се случи грешка. Обиди се повторно.';
+    } catch (_) {
+      return 'Нема интернет конекција.';
+    }
   }
 
   /// Прифаќа барање за пријателство преку Cloud Function
   /// (`acceptFriendRequest`) — атомски ги ажурира `friendIds` на двата
   /// корисника, што со обичен клиентски запис не е безбедно изводливо.
-  Future<void> acceptFriendRequest(String requesterId) async {
-    if (currentUserId == null) return;
+  Future<String?> acceptFriendRequest(String requesterId) async {
+    if (currentUserId == null) return null;
     try {
       await FirebaseFunctions.instanceFor(region: 'europe-west1')
           .httpsCallable('acceptFriendRequest')
           .call(<String, dynamic>{'fromUserId': requesterId});
-    } catch (_) {}
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      return e.message ?? 'Се случи грешка. Обиди се повторно.';
+    } catch (_) {
+      return 'Нема интернет конекција.';
+    }
   }
 
-  Future<void> declineFriendRequest(String requesterId) async {
-    if (currentUserId == null) return;
+  Future<String?> declineFriendRequest(String requesterId) async {
+    if (currentUserId == null) return null;
     try {
       await FirebaseFunctions.instanceFor(region: 'europe-west1')
           .httpsCallable('declineFriendRequest')
           .call(<String, dynamic>{'fromUserId': requesterId});
-    } catch (_) {}
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      return e.message ?? 'Се случи грешка. Обиди се повторно.';
+    } catch (_) {
+      return 'Нема интернет конекција.';
+    }
   }
 
-  Future<void> unfriend(String otherUserId) async {
-    if (currentUserId == null) return;
+  Future<String?> unfriend(String otherUserId) async {
+    if (currentUserId == null) return null;
     try {
       await FirebaseFunctions.instanceFor(region: 'europe-west1')
           .httpsCallable('unfriend')
           .call(<String, dynamic>{'otherUserId': otherUserId});
-    } catch (_) {}
+      return null;
+    } on FirebaseFunctionsException catch (e) {
+      return e.message ?? 'Се случи грешка. Обиди се повторно.';
+    } catch (_) {
+      return 'Нема интернет конекција.';
+    }
   }
 
   // ---------------------------------------------------------------------
