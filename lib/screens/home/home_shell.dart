@@ -81,7 +81,10 @@ class _HomeShellState extends State<HomeShell> {
                   label: 'Нотиф.',
                   selected: _index == 2,
                   badgeCount: unread,
-                  onTap: () => setState(() => _index = 2),
+                  onTap: () {
+                    setState(() => _index = 2);
+                    appStore.markAllNotificationsRead();
+                  },
                 ),
                 _NavItem(
                   icon: AppIcons.profile,

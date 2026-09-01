@@ -5,6 +5,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/app_user.dart';
 import '../models/comment.dart';
@@ -21,7 +22,8 @@ import '../models/relationship_status.dart';
 /// — види docs/FIREBASE_SETUP.md.
 class MockDataStore extends ChangeNotifier {
   MockDataStore() {
-    _seedDemoData();
+    // demo komentirano
+    // _seedDemoData();
   }
 
   bool _tokenRefreshListenerAttached = false;
@@ -162,10 +164,11 @@ class MockDataStore extends ChangeNotifier {
   }
 
   /// Брз начин да се прегледа апликацијата без рачно регистрирање.
-  void loginAsDemoUser() {
-    currentUserId = _users.first.id;
-    notifyListeners();
-  }
+  /// Исклучено заедно со демо-копчето на login екранот и seed податоците.
+  // void loginAsDemoUser() {
+  //   currentUserId = _users.first.id;
+  //   notifyListeners();
+  // }
 
   Future<void> logout() async {
     if (_fcmToken != null) {
@@ -301,20 +304,22 @@ class MockDataStore extends ChangeNotifier {
     return null;
   }
 
-  final Set<String> _pendingRemoteSearchQueries = {};
+  bool _allUsersLoadedForSearch = false;
+  bool _allUsersLoadingForSearch = false;
 
-  /// Пребарува локално вчитани корисници веднаш (за responsive UI), и
-  /// паралелно бара по точен `username` во Firestore за корисници што сѐ
-  /// уште не се локално вчитани — потребно откако feed-от е ограничен само
-  /// на пријатели, па нови корисници повеќе не се автоматски вчитуваат
-  /// преку туѓи објави. Точен match (не prefix) - prefix-range query со
-  /// invisible upper-bound character не работеше поуздано преку
-  /// платформскиот канал на Android, па е избегнат.
+  /// Пребарува локално вчитани корисници (по име ИЛИ корисничко име), откако
+  /// прво (еднаш, лениво) го вчитува целиот `users` collection во `_users` —
+  /// потребно откако feed-от е ограничен само на пријатели, па нови
+  /// корисници повеќе не се автоматски вчитуваат преку туѓи објави.
+  /// Порано овде имаше само точен match по `username` во Firestore
+  /// (prefix-range query со invisible upper-bound character не работеше
+  /// поуздано преку платформскиот канал на Android), па пребарување по
+  /// име никогаш не наоѓаше корисници кои сѐ уште не се локално вчитани.
   List<AppUser> searchUsers(String query) {
     final q = query.trim().toLowerCase();
     if (q.isEmpty) return [];
 
-    unawaited(_searchUsersRemote(q));
+    unawaited(_ensureAllUsersLoadedForSearch());
 
     return _users.where((u) {
       if (u.id == currentUserId) return false;
@@ -323,15 +328,11 @@ class MockDataStore extends ChangeNotifier {
     }).toList();
   }
 
-  Future<void> _searchUsersRemote(String query) async {
-    if (_pendingRemoteSearchQueries.contains(query)) return;
-    _pendingRemoteSearchQueries.add(query);
+  Future<void> _ensureAllUsersLoadedForSearch() async {
+    if (_allUsersLoadedForSearch || _allUsersLoadingForSearch) return;
+    _allUsersLoadingForSearch = true;
     try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('users')
-          .where('username', isEqualTo: query)
-          .limit(10)
-          .get();
+      final snapshot = await FirebaseFirestore.instance.collection('users').get();
       var changed = false;
       for (final doc in snapshot.docs) {
         if (_users.any((u) => u.id == doc.id)) continue;
@@ -346,11 +347,28 @@ class MockDataStore extends ChangeNotifier {
         ));
         changed = true;
       }
-      if (changed) notifyListeners();
+      _allUsersLoadedForSearch = true;
+      // `searchUsers` (the only caller) runs inside SearchScreen's
+      // ListenableBuilder, so this Future can resolve while a keystroke's
+      // own setState is still mid-rebuild of the same frame. Calling
+      // notifyListeners() straight away can then trip Flutter's
+      // 'child == _child' assertion from two overlapping rebuilds — defer
+      // to right after the current frame instead.
+      if (changed) _notifySafely();
     } catch (e) {
-      debugPrint('searchUsers remote query failed: $e');
+      debugPrint('loadAllUsersForSearch failed: $e');
     } finally {
-      _pendingRemoteSearchQueries.remove(query);
+      _allUsersLoadingForSearch = false;
+    }
+  }
+
+  /// See `_ensureAllUsersLoadedForSearch` for why this exists instead of a
+  /// plain `notifyListeners()` call.
+  void _notifySafely() {
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.idle) {
+      notifyListeners();
+    } else {
+      SchedulerBinding.instance.addPostFrameCallback((_) => notifyListeners());
     }
   }
 
@@ -578,11 +596,16 @@ class MockDataStore extends ChangeNotifier {
         }
       }
       for (final post in posts) {
-        final idx = _firestorePosts.indexWhere((p) => p.id == post.id);
-        if (idx == -1) {
+        // Never replace an already-tracked post's object — toggleLike/
+        // addComment/updatePost mutate that exact instance in place, and
+        // this screen's own like/comment (or a Feed action happening at the
+        // same time, since HomeShell keeps every tab alive) can be racing
+        // this fetch. Overwriting the reference here was silently
+        // reverting whichever one lost the race, even though the write
+        // itself had already reached Firestore.
+        final alreadyTracked = _firestorePosts.any((p) => p.id == post.id);
+        if (!alreadyTracked) {
           _firestorePosts.add(post);
-        } else {
-          _firestorePosts[idx] = post;
         }
       }
       notifyListeners();
@@ -648,7 +671,16 @@ class MockDataStore extends ChangeNotifier {
             // Skip malformed post docs so one bad document can't sink the feed.
           }
         }
-        _firestorePosts.addAll(newPosts);
+        // Dedupe against whatever's already tracked (see fetchPostsForUser
+        // for why: same reasoning — never swap in a second object for a
+        // post id we already have, and pagination pages can in principle
+        // overlap with posts added by other means, e.g. createPost's
+        // optimistic insert).
+        for (final post in newPosts) {
+          if (!_firestorePosts.any((p) => p.id == post.id)) {
+            _firestorePosts.add(post);
+          }
+        }
         if (snapshot.docs.length < _pageSize) _hasMoreFeed = false;
 
         // Make sure authors are in _users
@@ -735,6 +767,65 @@ class MockDataStore extends ChangeNotifier {
     return post;
   }
 
+  /// Уредува title/description/датуми на сопствена објава. Firestore
+  /// правилата дозволуваат ажурирање само на овие полиња и само од авторот.
+  Future<String?> updatePost({
+    required String postId,
+    required String title,
+    required String description,
+    required DateTime startDate,
+    DateTime? endDate,
+  }) async {
+    final post = postById(postId);
+    if (post == null) return 'Објавата не е пронајдена.';
+    if (post.authorId != currentUserId) return 'Не можеш да ја уредуваш оваа објава.';
+
+    final prevTitle = post.title;
+    final prevDescription = post.description;
+    post.title = title;
+    post.description = description;
+    notifyListeners();
+
+    try {
+      final data = <String, dynamic>{
+        'title': title,
+        'description': description,
+        'startDate': Timestamp.fromDate(startDate),
+      };
+      if (endDate != null) {
+        data['endDate'] = Timestamp.fromDate(endDate);
+      } else {
+        data['endDate'] = FieldValue.delete();
+      }
+      await FirebaseFirestore.instance.collection('posts').doc(postId).update(data);
+      return null;
+    } catch (_) {
+      // Rollback optimistic edit on failure.
+      post.title = prevTitle;
+      post.description = prevDescription;
+      notifyListeners();
+      return 'Не може да се зачува. Провери го интернетот.';
+    }
+  }
+
+  /// Брише сопствена објава. Firestore правилата дозволуваат бришење само
+  /// од авторот.
+  Future<String?> deletePost(String postId) async {
+    final post = postById(postId);
+    if (post == null) return 'Објавата не е пронајдена.';
+    if (post.authorId != currentUserId) return 'Не можеш да ја избришеш оваа објава.';
+
+    try {
+      await FirebaseFirestore.instance.collection('posts').doc(postId).delete();
+      _posts.remove(post);
+      _firestorePosts.remove(post);
+      notifyListeners();
+      return null;
+    } catch (_) {
+      return 'Не може да се избрише. Провери го интернетот.';
+    }
+  }
+
   void toggleLike(String postId) {
     if (currentUserId == null) return;
     final post = postById(postId);
@@ -742,14 +833,10 @@ class MockDataStore extends ChangeNotifier {
     final liking = !post.likedByUser(currentUserId!);
     if (liking) {
       post.likedBy.add(currentUserId!);
-      if (post.authorId != currentUserId) {
-        _addNotification(
-          forUserId: post.authorId,
-          type: NotificationType.like,
-          actorId: currentUserId!,
-          postId: post.id,
-        );
-      }
+      // No local notification here — the `onPostLiked` Cloud Function trigger
+      // already writes the real notification to Firestore once the update
+      // below lands, and it reaches us via `_notificationsSub`. Adding one
+      // here too used to double up every like into two entries.
     } else {
       post.likedBy.remove(currentUserId!);
     }
@@ -765,6 +852,37 @@ class MockDataStore extends ChangeNotifier {
     final list = _comments.where((c) => c.postId == postId).toList();
     list.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     return list;
+  }
+
+  /// Ги вчитува коментарите на еден пост од Firestore-подколекцијата во
+  /// `_comments`. Без ова, `commentsForPost`/`commentCount` знаеја само за
+  /// коментари додадени од тековниот корисник во тековната сесија — ниту
+  /// туѓи коментари, ниту сопствени од претходна сесија, никогаш не се
+  /// читаа назад од серверот.
+  Future<void> fetchCommentsForPost(String postId) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('posts')
+          .doc(postId)
+          .collection('comments')
+          .orderBy('createdAt')
+          .get();
+      var changed = false;
+      for (final doc in snapshot.docs) {
+        if (_comments.any((c) => c.id == doc.id)) continue;
+        try {
+          final comment = Comment.fromFirestore(doc, postId);
+          _comments.add(comment);
+          await _ensureUserLoaded(comment.authorId);
+          changed = true;
+        } catch (_) {
+          // Skip malformed comment docs so one bad document can't sink the list.
+        }
+      }
+      if (changed) notifyListeners();
+    } catch (_) {
+      // Best-effort — leave whatever local state we already have.
+    }
   }
 
   Comment addComment(String postId, String text) {
@@ -796,16 +914,79 @@ class MockDataStore extends ChangeNotifier {
       'createdAt': Timestamp.fromDate(comment.createdAt),
     }).catchError((_) {});
 
-    if (post.authorId != currentUserId) {
-      _addNotification(
-        forUserId: post.authorId,
-        type: NotificationType.comment,
-        actorId: currentUserId!,
-        postId: post.id,
-      );
-    }
+    // No local notification here — `onCommentCreated` handles it server-side
+    // (see toggleLike for the same reasoning on likes).
     notifyListeners();
     return comment;
+  }
+
+  /// Уредува текст на сопствен коментар.
+  Future<String?> updateComment({
+    required String postId,
+    required String commentId,
+    required String text,
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return 'Коментарот не може да биде празен.';
+    Comment? comment;
+    try {
+      comment = _comments.firstWhere((c) => c.id == commentId);
+    } catch (_) {}
+    if (comment == null) return 'Коментарот не е пронајден.';
+    if (comment.authorId != currentUserId) return 'Не можеш да го уредуваш овој коментар.';
+
+    final prevText = comment.text;
+    comment.text = trimmed;
+    notifyListeners();
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('posts')
+          .doc(postId)
+          .collection('comments')
+          .doc(commentId)
+          .update({'text': trimmed});
+      return null;
+    } catch (_) {
+      comment.text = prevText;
+      notifyListeners();
+      return 'Не може да се зачува. Провери го интернетот.';
+    }
+  }
+
+  /// Брише сопствен коментар и го отстранува неговото ID од постот.
+  Future<String?> deleteComment({
+    required String postId,
+    required String commentId,
+  }) async {
+    Comment? comment;
+    try {
+      comment = _comments.firstWhere((c) => c.id == commentId);
+    } catch (_) {}
+    if (comment == null) return 'Коментарот не е пронајден.';
+    if (comment.authorId != currentUserId) return 'Не можеш да го избришеш овој коментар.';
+
+    final post = postById(postId);
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('posts')
+          .doc(postId)
+          .collection('comments')
+          .doc(commentId)
+          .delete();
+      _comments.remove(comment);
+      if (post != null) {
+        post.commentIds.remove(commentId);
+        await FirebaseFirestore.instance.collection('posts').doc(postId).update({
+          'commentIds': post.commentIds,
+        }).catchError((_) {});
+      }
+      notifyListeners();
+      return null;
+    } catch (_) {
+      return 'Не може да се избрише. Провери го интернетот.';
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -855,28 +1036,26 @@ class MockDataStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _addNotification({
-    required String forUserId,
-    required NotificationType type,
-    required String actorId,
-    String? postId,
-  }) {
-    _notifications.add(
-      NotificationItem(
-        id: 'n${_notifications.length + 1}_${DateTime.now().millisecondsSinceEpoch}',
-        recipientId: forUserId,
-        type: type,
-        actorId: actorId,
-        postId: postId,
-        createdAt: DateTime.now(),
-      ),
-    );
+  void deleteNotification(String id) {
+    final remoteIdx = _firestoreNotifications.indexWhere((n) => n.id == id);
+    if (remoteIdx != -1) {
+      _firestoreNotifications.removeAt(remoteIdx);
+      unawaited(
+          FirebaseFirestore.instance.collection('notifications').doc(id).delete());
+      notifyListeners();
+      return;
+    }
+    _notifications.removeWhere((n) => n.id == id);
+    notifyListeners();
   }
 
   // ---------------------------------------------------------------------
   // Demo seed data — само за преглед на UI flow-то без вистински backend.
+  // Исклучено (не се повикува од конструкторот) — сепак закоментирано, не
+  // избришано, за лесно да се врати демо режимот ако затреба повторно.
   // ---------------------------------------------------------------------
 
+  // ignore: unused_element
   void _seedDemoData() {
     final marija = AppUser(
       id: 'u1',

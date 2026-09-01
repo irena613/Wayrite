@@ -6,11 +6,18 @@ import '../theme/app_typography.dart';
 import '../utils/date_format.dart';
 import 'user_avatar.dart';
 
-/// Дизајн систем — ред со коментар во детален преглед на објава.
+
 class CommentTile extends StatelessWidget {
   final Comment comment;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
 
-  const CommentTile({super.key, required this.comment});
+  const CommentTile({
+    super.key,
+    required this.comment,
+    this.onEdit,
+    this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -48,6 +55,21 @@ class CommentTile extends StatelessWidget {
               ),
             ),
           ),
+          if (onEdit != null || onDelete != null)
+            PopupMenuButton<String>(
+              padding: EdgeInsets.zero,
+              icon: const Icon(Icons.more_vert, size: 18),
+              onSelected: (value) {
+                if (value == 'edit') onEdit?.call();
+                if (value == 'delete') onDelete?.call();
+              },
+              itemBuilder: (context) => [
+                if (onEdit != null)
+                  const PopupMenuItem(value: 'edit', child: Text('Уреди')),
+                if (onDelete != null)
+                  const PopupMenuItem(value: 'delete', child: Text('Избриши')),
+              ],
+            ),
         ],
       ),
     );

@@ -1,236 +1,165 @@
-# Firebase Setup — чекор по чекор
+# Firebase Backend — што е направено и како да се работи локално
 
-Оваа апликација моментално работи со in-memory mock backend
-([`lib/data/mock_data_store.dart`](../lib/data/mock_data_store.dart)) за UI
-flow-то да може да се демонстрира без вистински сервер. Овој документ
-објаснува како да се креира Firebase проект и да се поврзе со Auth,
-Firestore, Cloud Functions и Cloud Messaging. Чекорите 1–4 се прават рачно
-во браузер (потребна е твоја Google сметка), чекор 5+ е код кој аз/ти
-можеме да го додадеме откако проектот постои.
+Апликацијата **веќе е поврзана** со вистински Firebase backend — ова не е
+план за иднина, туку опис на тековната имплементација (Authentication,
+Firestore, Cloud Functions, Cloud Messaging). Клучен архитектурен принцип:
+сите екрани комуницираат само преку [`appStore`](../lib/data/app_store.dart)
+(`MockDataStore`), кое внатрешно повикува вистински Firebase SDK-и — UI
+кодот во `lib/screens/` не знае дали работи со emulator или продукција.
 
-## 1. Креирање на Firebase проект
-
-1. Оди на https://console.firebase.google.com и логирај се со Google сметка.
-2. „Add project" → внеси име (пр. `timski-app`) → продолжи.
-3. Google Analytics е опционално за овој проект — може да се исклучи.
-4. Кога проектот е креиран, во левото мени додади Android/iOS/Web апликации
-   (зависно што градиш):
-   - **Android**: package name мора да се совпаѓа со `android/app/build.gradle`
-     (`applicationId`). Се прескокнува рачно симнување на `google-services.json`
-     ако користиш FlutterFire CLI (чекор 2 подолу прави сè автоматски).
-   - **iOS**: bundle id од `ios/Runner.xcodeproj`.
-   - **Web**: ако планираш да градиш и за `flutter run -d chrome`.
-
-## 2. Поврзување со Flutter проектот (FlutterFire CLI)
-
-Во терминал, во root на овој проект:
-
-```bash
-dart pub global activate flutterfire_cli
-firebase login
-flutterfire configure
-```
-
-`flutterfire configure` ќе те праша кој Firebase проект да се користи и за
-кои платформи — автоматски генерира `lib/firebase_options.dart` и
-ги поставува native конфигурациите (`google-services.json`,
-`GoogleService-Info.plist`).
-
-> Ако `firebase` CLI не е инсталиран: `npm install -g firebase-tools`.
-
-## 3. Authentication
-
-Во Firebase Console → **Build → Authentication → Sign-in method**:
-
-1. Активирај **Email/Password** (ова го покрива `LoginScreen`/`RegisterScreen`).
-2. (Опционално) активирај **Google** sign-in ако сакаш побрза регистрација.
-
-Во `pubspec.yaml` додади:
-
-```yaml
-dependencies:
-  firebase_core: ^3.8.0
-  firebase_auth: ^5.3.3
-```
-
-Замена на mock логиката во `MockDataStore.login`/`register` со:
-
-```dart
-final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
-  email: email, password: password,
-);
-```
-
-## 4. Firestore (база на податоци)
-
-Во Firebase Console → **Build → Firestore Database** → „Create database" →
-избери production mode → избери регион (пр. `eur3` за Европа).
-
-### Препорачана структура на колекции
-
-Соодветствува директно на моделите во `lib/models/`:
+## 1. Податочен модел (Firestore)
 
 ```
 users/{userId}
   name, username, email, bio
+  friendIds: string[]     // денормализирано, менувано САМО од Cloud Functions
+  fcmTokens: string[]     // push токени, менувано САМО од Cloud Functions
+
+friendRequests/{fromUserId}_{toUserId}
+  fromUserId, toUserId, createdAt
+  // Doc id е детерминистички (`friendRequestDocId`) за брзо look-up на
+  // постоечко/реверзно барање. Клиентот само чита; сите пишувања се преку
+  // Cloud Functions (виж подолу).
 
 posts/{postId}
   authorId, type ("achievement" | "quit"), title, description,
   startDate (Timestamp), endDate (Timestamp?), createdAt (Timestamp),
-  likeCount (number)               // денормализирано за брзо читање
-posts/{postId}/likes/{userId}      // subcollection, постоење = liked
+  likedBy: string[], commentIds: string[]
+
 posts/{postId}/comments/{commentId}
   authorId, text, createdAt
 
-friendships/{userId}/friends/{friendId}     // симетрично, се пишува на двете страни
-friendRequests/{targetUserId}/incoming/{requesterId}
-  createdAt
-
-notifications/{userId}/items/{notificationId}
-  type, actorId, postId?, createdAt, read (bool)
+notifications/{notifId}
+  recipientId, type ("like" | "comment" | "friendRequest" | "friendAccept"),
+  actorId, postId?, read (bool), createdAt
+  // Запишувани исклучиво од Cloud Functions (Admin SDK), никогаш директно
+  // од клиентот.
 ```
 
-Додади во `pubspec.yaml`:
+Нема `friendships`/`friendRequests/{uid}/incoming` подколекции ниту
+денормализирани `likeCount` полиња — тоа беше првобитен план во постара
+верзија на овој документ, но фактичката имплементација користи `friendIds`
+низа директно на `users` документот (побрзо за проверка на пријателство во
+rules преку еден `get()`) и `likedBy`/`commentIds` низи директно на
+`posts` документот.
 
-```yaml
-dependencies:
-  cloud_firestore: ^5.5.0
-```
+## 2. Security rules ([`firestore.rules`](../firestore.rules))
 
-### Security rules (почетна верзија)
+- **`users/{userId}`** — секој најавен корисник може да чита кој било
+  профил (потребно за search/feed/profile екраните). Пишување само на
+  сопствениот документ, и **никогаш** директно на `friendIds`/`fcmTokens` —
+  тие полиња ги менуваат само Cloud Functions преку Admin SDK (кој ги
+  заобиколува rules-ите целосно).
+- **`friendRequests/{id}`** — читање само ако си испраќач или примач.
+  Пишување целосно забрането од клиент (`allow write: if false`) — секое
+  создавање/бришење оди преку Cloud Function за да остане атомско (пр.
+  проверка дека не постои веќе реверзно барање).
+- **`posts/{postId}`** — читливо само од авторот и неговите пријатели
+  (`isSelfOrFriend`). **Важно**: Firestore одбива `list` query во целост
+  ако кое било потенцијално совпаѓање не го задоволува rule-от — rules не
+  се филтри. Затоа клиентот секогаш го скопира query-то со
+  `where('authorId', whereIn: [self, ...friendIds])` (максимум 30
+  вредности), наместо да чита цела колекција. `update` дозволува само две
+  раздвоени промени: (а) авторот менува title/description/датуми, или (б)
+  авторот/пријател токглира точно својот uid во `likedBy`.
+- **`posts/{postId}/comments/{commentId}`** — исто ограничување
+  (author-or-friend), но бидејќи секој query овде е веќе скопиран на еден
+  `postId`, нема проблем со list-query одбивање.
+- **`notifications/{notifId}`** — читање/означување-како-прочитано само од
+  примачот (`recipientId == auth.uid`).
 
-```js
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == userId;
-    }
-    match /posts/{postId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null
-                     && request.resource.data.authorId == request.auth.uid;
-      allow update, delete: if request.auth != null
-                     && resource.data.authorId == request.auth.uid;
+## 3. Cloud Functions ([`functions/src/index.ts`](../functions/src/index.ts))
 
-      match /likes/{userId} {
-        allow read: if request.auth != null;
-        allow write: if request.auth != null && request.auth.uid == userId;
-      }
-      match /comments/{commentId} {
-        allow read: if request.auth != null;
-        allow create: if request.auth != null
-                       && request.resource.data.authorId == request.auth.uid;
-      }
-    }
-    match /notifications/{userId}/items/{itemId} {
-      allow read, update: if request.auth != null && request.auth.uid == userId;
-      allow create: if request.auth != null; // се создава од друг корисник/Cloud Function
-    }
-  }
-}
-```
+Сите се во регион `europe-west1`.
 
-## 5. Cloud Functions (нотификации при like/коментар/барање)
+| Функција | Тип | Што прави |
+|---|---|---|
+| `registerFcmToken` / `unregisterFcmToken` | `onCall` | Додава/отстранува FCM токен на `users/{uid}.fcmTokens` при login/logout. |
+| `createPostValidated` | `onCall` | Валидира и создава нова објава на серверска страна (истиот `postId` генериран од Flutter, за конзистентност со оптимистичкиот locален запис). |
+| `onCommentCreated` | `onDocumentCreated` (trigger) | При нов коментар, испраќа нотификација + push до авторот на објавата. |
+| `onPostLiked` | `onDocumentUpdated` (trigger) | При додаден нов uid во `likedBy`, испраќа нотификација + push до авторот. |
+| `updateAllStreaks` | `onSchedule` (секој ден во полноќ) | Го рекалкулира `currentStreakDays` за сите активни (без `endDate`) Quit-објави. |
+| `recalcStreak` | `onDocumentUpdated` (trigger) | Го рекалкулира streak-от веднаш штом се смени датум на Quit-објава. |
+| `sendFriendRequest` | `onCall` | Атомски проверува дека нема веќе пријателство/барање (во која било насока) па создава `friendRequests` документ + нотификација. |
+| `cancelFriendRequest` | `onCall` | Го брише сопственото испратено барање. |
+| `declineFriendRequest` | `onCall` | Го брише примено барање без да создаде пријателство. |
+| `acceptFriendRequest` | `onCall` | Во транзакција: додава меѓусебно `friendIds` на двата корисника + брише барањето + испраќа нотификација. |
+| `unfriend` | `onCall` | Batch write — отстранува меѓусебно `friendIds` на двата корисника. |
+
+## 4. Локален развој (Firebase Local Emulator Suite)
+
+Апликацијата (по default, `_useEmulator = true` во
+[`lib/main.dart`](../lib/main.dart)) зборува со **локален** emulator, не со
+продукција — сигурно е за тестирање без да се допрат реални податоци.
+
+### Предуслови
+
+- **Node.js** + `npm install -g firebase-tools`, потоа `npm install` во
+  `functions/`.
+- **JDK 11+** за Firestore emulator-от. Ако системски е инсталиран постар
+  JDK (пр. 8), emulator-от паѓа со
+  `UnsupportedClassVersionError`/`Unsupported java version`. На Windows,
+  најлесно решение е да се насочи кон JDK-то вградено во Android Studio,
+  без инсталирање ново:
+  ```bash
+  export JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
+  export PATH="$JAVA_HOME/bin:$PATH"
+  ```
+- **Android emulator/уред**: cleartext HTTP кон emulator-ите е блокирано by
+  default од API 28. Затоа постои
+  [`android/app/src/debug/res/xml/network_security_config.xml`](../android/app/src/debug/res/xml/network_security_config.xml)
+  (allowlist за `10.0.2.2`/`localhost`), референциран во
+  [`android/app/src/debug/AndroidManifest.xml`](../android/app/src/debug/AndroidManifest.xml).
+  Промена тука бара **целосен rebuild**, не hot reload/restart.
+- **Конфигурациски датотеки кои НЕ се во git** (види `.gitignore`):
+  `lib/firebase_options.dart` и `android/app/google-services.json`. Без
+  нив апликацијата не се билдира воопшто (`Firebase.initializeApp()` нема
+  на што да укаже). Земи ги директно или регенерирај ги со
+  `flutterfire configure` (потребен пристап до Firebase проектот).
+
+### Стартување
 
 ```bash
-firebase init functions
+firebase emulators:start --import=./emulator-data --export-on-exit=./emulator-data
 ```
 
-Избери TypeScript или JavaScript. Пример функција која при нов коментар
-праќа push нотификација до авторот на објавата (триггер-базирана
-архитектура — ова е причината зошто Functions се потребни наместо да се
-праќа FCM директно од клиента):
+- `--import` ги вчитува претходно зачуваните тест-профили/објави (ако
+  постои `emulator-data/`, изворно направена со
+  `firebase emulators:export ./emulator-data`). Без `--import`, почнуваш
+  со празна база.
+- `--export-on-exit` автоматски ги зачувува податоците при чист gracefully
+  shutdown (Ctrl+C), за да не се губат тест-профилите меѓу сесии.
+- Emulator UI: http://127.0.0.1:4000 (Firestore/Auth/Functions табови).
+- Портите (Firestore 8080, Auth 9099, Functions 5001, UI 4000) се
+  конфигурирани во [`firebase.json`](../firebase.json).
 
-```ts
-// functions/src/index.ts
-import * as functions from "firebase-functions/v2/firestore";
-import { getMessaging } from "firebase-admin/messaging";
-import { getFirestore } from "firebase-admin/firestore";
-import { initializeApp } from "firebase-admin/app";
-
-initializeApp();
-const db = getFirestore();
-
-export const onNewComment = functions.onDocumentCreated(
-  "posts/{postId}/comments/{commentId}",
-  async (event) => {
-    const comment = event.data?.data();
-    if (!comment) return;
-
-    const postSnap = await db.doc(`posts/${event.params.postId}`).get();
-    const post = postSnap.data();
-    if (!post || post.authorId === comment.authorId) return; // не нотифицирај себе си
-
-    await db.collection(`notifications/${post.authorId}/items`).add({
-      type: "comment",
-      actorId: comment.authorId,
-      postId: event.params.postId,
-      createdAt: new Date(),
-      read: false,
-    });
-
-    const authorSnap = await db.doc(`users/${post.authorId}`).get();
-    const fcmToken = authorSnap.data()?.fcmToken;
-    if (fcmToken) {
-      await getMessaging().send({
-        token: fcmToken,
-        notification: {
-          title: "Нов коментар",
-          body: `${comment.authorId} коментираше на твојата објава`,
-        },
-      });
-    }
-  }
-);
-```
-
-Деплојирање:
-
-```bash
-firebase deploy --only functions
-```
-
-Истиот шаблон се копира за `onNewLike` (trigger на `posts/{postId}/likes/{userId}`
-create) и `onFriendRequest` (trigger на `friendRequests/{userId}/incoming/{requesterId}`).
-
-## 6. Cloud Messaging (push нотификации)
-
-Во Firebase Console → **Build → Cloud Messaging** — не треба рачна
-конфигурација ако веќе си направил чекор 2 (FlutterFire CLI ги поставува
-APNs/FCM клучевите за iOS автоматски, за Android работи "из кутија").
-
-```yaml
-dependencies:
-  firebase_messaging: ^15.1.6
-```
-
-Во апликацијата, при логирање, зачувај `fcmToken` во `users/{userId}`:
+`lib/main.dart` содржи:
 
 ```dart
-final token = await FirebaseMessaging.instance.getToken();
-await FirebaseFirestore.instance.collection('users').doc(uid).update({
-  'fcmToken': token,
-});
+const _useEmulator = true;
+const _emulatorHost = '10.0.2.2'; // Android emulator alias за host machine-от
 ```
 
-За Android треба и `minSdkVersion 21+` во `android/app/build.gradle`
-(стандардно е веќе задоволено во нов Flutter проект).
+За физички уред, замени со LAN IPv4-адресата на твојот компјутер
+(`ipconfig`) и осигурај се дека уредот е на иста мрежа.
 
-## 7. Редослед на интеграција (препорака)
+## 5. Деплојирање на вистински Firebase проект
 
-1. Authentication (замени `login`/`register`/`logout` во `MockDataStore`)
-2. Firestore за `users`, `posts`, `comments`, `likes` (замени
-   `createPost`/`toggleLike`/`addComment`/`feedPosts`)
-3. Firestore за `friendRequests`/`friendships` (замени
-   `sendFriendRequest`/`acceptFriendRequest`/...)
-4. Cloud Functions + Firestore `notifications` (замени `_addNotification`
-   логиката — таа треба да се пресели од клиент на Cloud Function за
-   сигурност и доследност)
-5. Cloud Messaging (push нотификации кога апликацијата е во background)
+```bash
+firebase deploy --only firestore:rules,functions
+```
 
-Бидејќи сите екрани комуницираат само преку `appStore`
-([`lib/data/app_store.dart`](../lib/data/app_store.dart)), секој од овие
-чекори значи замена на внатрешноста на `MockDataStore` со повици кон
-Firebase — UI кодот во `lib/screens/` не треба да се менува.
+Потоа во `lib/main.dart`, стави `_useEmulator = false` — апликацијата ќе
+зборува со реалниот проект (без промена во UI кодот).
+
+## 6. Познати ограничувања
+
+- `test/widget_test.dart` не повикува `Firebase.initializeApp()` пред да
+  рендерира `TimskiApp`, па паѓа со `[core/no-app]` — постоечки проблем,
+  не е поврзан со friends-функционалноста додадена подоцна. CI
+  ([`.github/workflows/flutter_ci.yml`](../.github/workflows/flutter_ci.yml))
+  моментално се активира само на push/PR кон `master`/`main`, не `dev`.
+- `searchUsers` е точен-match само по `username` (не prefix/substring) —
+  намерна одлука откако prefix-range query со невидлив sentinel карактер
+  за горна граница се покажа непоуздан преку Android platform channel-от
+  во тестирањето.

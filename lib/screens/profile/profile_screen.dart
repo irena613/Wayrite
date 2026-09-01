@@ -12,11 +12,6 @@ import '../post/post_detail_screen.dart';
 import 'edit_profile_screen.dart';
 import 'friends_list_screen.dart';
 
-/// Екран за кориснички профил — преглед на лични податоци + сопствени објави.
-///
-/// UI flow: Profile -> "Уреди профил" -> EditProfileScreen -> (зачувај) -> Profile
-///          Profile -> тап на објава -> PostDetailScreen
-///          Profile -> "Одјави се" -> LoginScreen
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
 
@@ -42,6 +37,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() => _posts = posts);
   }
 
+
+  List<Post> _mergedWithLiveStore(List<Post> fetched, String userId) {
+    final byId = {for (final p in fetched) p.id: p};
+    for (final p in appStore.firestorePosts) {
+      if (p.authorId == userId) byId[p.id] = p;
+    }
+    final merged = byId.values.toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return merged;
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -49,7 +55,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       builder: (context, _) {
         final user = appStore.currentUser;
         if (user == null) return const SizedBox.shrink();
-        final posts = _posts;
+        final posts = _posts == null ? null : _mergedWithLiveStore(_posts!, user.id);
         final friendsCount = appStore.friendsOf(user.id).length;
 
         return Scaffold(

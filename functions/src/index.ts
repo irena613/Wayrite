@@ -104,19 +104,29 @@ async function sendPushNotification(params: {
   postId?: string;
   title: string;
   body: string;
+  // Deterministic doc id (e.g. `like_{postId}_{actorId}`) so re-liking after
+  // an unlike updates the same notification instead of piling up a new one
+  // each time. Omit for one-shot notifications (comments, friend events).
+  notificationId?: string;
 }): Promise<void> {
-  const {recipientId, type, actorId, postId, title, body} = params;
+  const {recipientId, type, actorId, postId, title, body, notificationId} =
+    params;
 
   // 1. Зачувај нотификација во Firestore (за NotificationsScreen во Flutter)
   try {
-    await db.collection("notifications").add({
+    const data = {
       recipientId,
       type,
       actorId,
       ...(postId ? {postId} : {}),
       read: false,
       createdAt: Timestamp.now(),
-    });
+    };
+    if (notificationId) {
+      await db.collection("notifications").doc(notificationId).set(data);
+    } else {
+      await db.collection("notifications").add(data);
+    }
     logger.info("sendPush: notification written", {recipientId, type, postId});
   } catch (e) {
     logger.error("sendPush: Firestore write failed", {
@@ -258,7 +268,11 @@ export const onCommentCreated = onDocumentCreated(
 
 /**
  * Активира се при секоја промена на post-документот.
- * Ако во `likedBy` е додаден нов userId, испраќа нотификација за лајк.
+ * Ако во `likedBy` е додаден нов userId, испраќа (или ажурира) нотификација
+ * за лајк со детерминистички doc id `like_{postId}_{actorId}` — повторен лајк
+ * од истиот корисник го ажурира истиот документ наместо да создава нов.
+ * Ако userId е отстранет (unlike), тој ист документ се брише, за
+ * нотификацијата веднаш да исчезне од примачот.
  * Промени на други полиња (commentIds, title...) се игнорираат.
  */
 export const onPostLiked = onDocumentUpdated(
@@ -273,18 +287,36 @@ export const onPostLiked = onDocumentUpdated(
       return;
     }
 
-    // Пронајди нов userId додаден во likedBy
     const likedBefore = new Set<string>(before.likedBy ?? []);
     const likedAfter = new Set<string>(after.likedBy ?? []);
     const newLiker = [...likedAfter].find((uid) => !likedBefore.has(uid));
-    if (!newLiker) return; // лајк е отстранет, или промената е на друго поле
+    const removedLiker = [...likedBefore].find((uid) => !likedAfter.has(uid));
+    if (!newLiker && !removedLiker) return; // промената е на друго поле
 
     const postAuthorId = after.authorId as string;
     const postTitle = after.title as string;
-    logger.info("onPostLiked: new like detected", {postId, newLiker});
 
-    // Не испраќај нотификација за лајк на сопствена објава
-    if (newLiker === postAuthorId) return;
+    if (removedLiker && removedLiker !== postAuthorId) {
+      logger.info("onPostLiked: like removed, deleting notification", {
+        postId,
+        removedLiker,
+      });
+      await db
+        .collection("notifications")
+        .doc(`like_${postId}_${removedLiker}`)
+        .delete()
+        .catch((e) => {
+          logger.warn("onPostLiked: notification delete failed", {
+            postId,
+            removedLiker,
+            error: (e as Error).message,
+          });
+        });
+      return;
+    }
+
+    if (!newLiker || newLiker === postAuthorId) return;
+    logger.info("onPostLiked: new like detected", {postId, newLiker});
 
     // Вчитај го името на корисникот кој лајкувал
     let actorName = "Некој";
@@ -302,6 +334,7 @@ export const onPostLiked = onDocumentUpdated(
       postId,
       title: actorName,
       body: `му се допадна „${postTitle}"`,
+      notificationId: `like_${postId}_${newLiker}`,
     });
 
     logger.info("onPostLiked: done", {postId, newLiker});

@@ -9,12 +9,12 @@ import '../../core/widgets/app_text_field.dart';
 import '../../data/app_store.dart';
 import '../../models/post.dart';
 
-/// Екран за креирање објава (Achievement / Quit) со наслов, опис и датуми.
-///
-/// UI flow: Feed -> (FAB +) -> CreatePost -> "Објави" -> назад на Feed
-/// (новата објава се појавува на врвот, бидејќи Feed е хронолошки сортиран).
+/// новата објава се појавува на врвот, бидејќи Feed е хронолошки сортиран
 class CreatePostScreen extends StatefulWidget {
-  const CreatePostScreen({super.key});
+
+  final Post? editingPost;
+
+  const CreatePostScreen({super.key, this.editingPost});
 
   @override
   State<CreatePostScreen> createState() => _CreatePostScreenState();
@@ -22,12 +22,16 @@ class CreatePostScreen extends StatefulWidget {
 
 class _CreatePostScreenState extends State<CreatePostScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _titleController = TextEditingController();
-  final _descriptionController = TextEditingController();
-  PostType _type = PostType.achievement;
-  DateTime _startDate = DateTime.now();
-  DateTime? _endDate;
+  late final _titleController =
+      TextEditingController(text: widget.editingPost?.title ?? '');
+  late final _descriptionController =
+      TextEditingController(text: widget.editingPost?.description ?? '');
+  late PostType _type = widget.editingPost?.type ?? PostType.achievement;
+  late DateTime _startDate = widget.editingPost?.startDate ?? DateTime.now();
+  late DateTime? _endDate = widget.editingPost?.endDate;
   bool _loading = false;
+
+  bool get _isEditing => widget.editingPost != null;
 
   @override
   void dispose() {
@@ -58,15 +62,32 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
-    await appStore.createPost(
-      type: _type,
-      title: _titleController.text.trim(),
-      description: _descriptionController.text.trim(),
-      startDate: _startDate,
-      endDate: _endDate,
-    );
+
+    String? error;
+    if (_isEditing) {
+      error = await appStore.updatePost(
+        postId: widget.editingPost!.id,
+        title: _titleController.text.trim(),
+        description: _descriptionController.text.trim(),
+        startDate: _startDate,
+        endDate: _endDate,
+      );
+    } else {
+      await appStore.createPost(
+        type: _type,
+        title: _titleController.text.trim(),
+        description: _descriptionController.text.trim(),
+        startDate: _startDate,
+        endDate: _endDate,
+      );
+    }
+
     if (!mounted) return;
     setState(() => _loading = false);
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Објавата е зачувана! ✓')),
     );
@@ -76,7 +97,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Нова објава')),
+      appBar: AppBar(title: Text(_isEditing ? 'Уреди објава' : 'Нова објава')),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(AppSpacing.lg),
         child: Form(
@@ -100,7 +121,8 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                   ),
                 ],
                 selected: {_type},
-                onSelectionChanged: (s) => setState(() => _type = s.first),
+                onSelectionChanged:
+                    _isEditing ? null : (s) => setState(() => _type = s.first),
                 style: ButtonStyle(
                   backgroundColor: WidgetStateProperty.resolveWith((states) {
                     if (states.contains(WidgetState.selected)) {
@@ -149,7 +171,11 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
                 ],
               ),
               const SizedBox(height: AppSpacing.xl),
-              PrimaryButton(label: 'Објави', onPressed: _submit, loading: _loading),
+              PrimaryButton(
+                label: _isEditing ? 'Зачувај' : 'Објави',
+                onPressed: _submit,
+                loading: _loading,
+              ),
             ],
           ),
         ),

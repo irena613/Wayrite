@@ -81,9 +81,11 @@ service cloud.firestore {
         && request.resource.data.get('likedBy', []) == []
         && request.resource.data.get('commentIds', []) == [];
 
-      // Two distinct, mutually exclusive kinds of update:
+      // Three distinct, mutually exclusive kinds of update:
       //  (a) the author edits their own title/description/dates
-      //  (b) the author or a friend toggles exactly their own uid in likedBy
+      //  (b) the author or a friend appends/removes exactly one commentId
+      //      (bookkeeping for a comment create/delete in the subcollection)
+      //  (c) the author or a friend toggles exactly their own uid in likedBy
       allow update: if isAuth() && (
         (
           resource.data.authorId == request.auth.uid
@@ -93,6 +95,20 @@ service cloud.firestore {
           && request.resource.data.title.size() <= 100
           && request.resource.data.description is string
           && request.resource.data.description.size() <= 500
+        )
+        || (
+          isSelfOrFriend(resource.data.authorId)
+          && onlyChangedKeys(['commentIds'])
+          && (
+            (
+              request.resource.data.commentIds.size() == resource.data.commentIds.size() + 1
+              && request.resource.data.commentIds.hasAll(resource.data.commentIds)
+            )
+            || (
+              resource.data.commentIds.size() == request.resource.data.commentIds.size() + 1
+              && resource.data.commentIds.hasAll(request.resource.data.commentIds)
+            )
+          )
         )
         || (
           isSelfOrFriend(resource.data.authorId)
@@ -133,15 +149,22 @@ service cloud.firestore {
           && request.resource.data.text.size() <= 500
           && request.resource.data.createdAt is timestamp;
 
+        allow update: if isAuth()
+          && resource.data.authorId == request.auth.uid
+          && onlyChangedKeys(['text'])
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500;
+
         allow delete: if isAuth() && resource.data.authorId == request.auth.uid;
       }
     }
 
     // ── Notifications ──────────────────────────────────────────────────────
     // Cloud Functions write notifications via the Admin SDK (bypasses rules).
-    // Recipients can read and mark their own notifications as read.
+    // Recipients can read, mark as read, and delete their own notifications.
     match /notifications/{notifId} {
-      allow read, update: if isAuth()
+      allow read, update, delete: if isAuth()
         && resource.data.recipientId == request.auth.uid;
     }
   }

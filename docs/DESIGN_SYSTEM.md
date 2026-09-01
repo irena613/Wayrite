@@ -56,7 +56,7 @@ Material Icons (вклучени преку `uses-material-design: true`, без
   `profile` (person)
 - Реакции: `like`/`likeOutline` (favorite), `comment`
 - Пријателство: `friendAdd`, `friendPending`, `friendAccept`, `friendDecline`,
-  `friends`
+  `friends`, `friendRemove`
 - Тип на објава: `emoji_events` (Achievement), `block` (Quit)
 
 ## Компоненти ([`lib/core/widgets/`](../lib/core/widgets))
@@ -70,7 +70,8 @@ Material Icons (вклучени преку `uses-material-design: true`, без
 | `PostCard` | `post_card.dart` | Feed и Профил листа на објави |
 | `LikeButton` | `like_button.dart` | Реакција со бројач |
 | `CommentTile` | `comment_tile.dart` | Ред во листа коментари |
-| `UserListTile` | `user_list_tile.dart` | Резултат од пребарување / барање за пријателство |
+| `UserListTile` | `user_list_tile.dart` | Резултат од пребарување / барање за пријателство / ред во листа пријатели |
+| `FriendActionButton` | `friend_action_button.dart` | Копче Додај/Чека/Прифати+Одбиј/Пријатели (лилав chip, тап = отпријателување со потврда) — споделено меѓу Search/UserProfile/FriendsList |
 | `NotificationTile` | `notification_tile.dart` | Ред во листа нотификации |
 | `EmptyState` | `empty_state.dart` | Празни состојби (нема објави/резултати/коментари) |
 

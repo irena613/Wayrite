@@ -11,7 +11,9 @@ import 'register_screen.dart';
 ///
 /// UI flow: Login -> (успешно) -> HomeShell
 ///          Login -> "Регистрирај се" -> RegisterScreen
-///          Login -> "Продолжи со демо профил" -> HomeShell (за брз преглед)
+///
+/// Demo-profil disabled, commented
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -21,8 +23,10 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController(text: 'marija@demo.mk');
-  final _passwordController = TextEditingController(text: 'demo123');
+  // final _emailController = TextEditingController(text: 'marija@demo.mk');
+  // final _passwordController = TextEditingController(text: 'demo123');
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
   bool _loading = false;
   String? _error;
 
@@ -49,10 +53,10 @@ class _LoginScreenState extends State<LoginScreen> {
     _goHome();
   }
 
-  void _continueAsDemo() {
-    appStore.loginAsDemoUser();
-    _goHome();
-  }
+  // void _continueAsDemo() {
+  //   appStore.loginAsDemoUser();
+  //   _goHome();
+  // }
 
   void _goHome() {
     Navigator.of(context).pushAndRemoveUntil(
@@ -101,11 +105,11 @@ class _LoginScreenState extends State<LoginScreen> {
                   ],
                   const SizedBox(height: AppSpacing.lg),
                   PrimaryButton(label: 'Најави се', onPressed: _submit, loading: _loading),
-                  const SizedBox(height: AppSpacing.sm),
-                  SecondaryButton(
-                    label: 'Продолжи со демо профил',
-                    onPressed: _continueAsDemo,
-                  ),
+                  // const SizedBox(height: AppSpacing.sm),
+                  // SecondaryButton(
+                  //   label: 'Продолжи со демо профил',
+                  //   onPressed: _continueAsDemo,
+                  // ),
                   const SizedBox(height: AppSpacing.lg),
                   TextButton(
                     onPressed: () => Navigator.of(context).push(

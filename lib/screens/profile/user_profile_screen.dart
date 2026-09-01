@@ -12,11 +12,8 @@ import '../../models/relationship_status.dart';
 import '../post/post_detail_screen.dart';
 import 'friends_list_screen.dart';
 
-/// Профил на друг корисник (не тековниот најавен) — податоци + објави,
-/// видливи само ако сме пријатели (согласно Firestore правилата).
-///
-/// UI flow: Search/FriendsList -> тап на ред -> UserProfileScreen
-///          UserProfileScreen -> "Пријатели" -> FriendsListScreen
+/// Профил на друг корисник (не тековниот најавен)
+// Видлив само ако се friends
 class UserProfileScreen extends StatefulWidget {
   final String userId;
 
@@ -55,6 +52,20 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     setState(() => _posts = posts);
   }
 
+  // See ProfileScreen._mergedWithLiveStore — same reasoning: `_posts` is
+  // fetched once and this screen can stay alive in the navigation stack, so
+  // merge in anything the store already has (e.g. a like/post that landed
+  // after the initial fetch) instead of requiring a manual refresh.
+  List<Post> _mergedWithLiveStore(List<Post> fetched, String userId) {
+    final byId = {for (final p in fetched) p.id: p};
+    for (final p in appStore.firestorePosts) {
+      if (p.authorId == userId) byId[p.id] = p;
+    }
+    final merged = byId.values.toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return merged;
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -65,7 +76,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         final isFriend =
             appStore.relationshipWith(widget.userId) == RelationshipStatus.friends;
         final friendsCount = appStore.friendsOf(widget.userId).length;
-        final posts = _posts;
+        final posts = _posts == null ? null : _mergedWithLiveStore(_posts!, widget.userId);
 
         return Scaffold(
           appBar: AppBar(title: Text(user.name)),

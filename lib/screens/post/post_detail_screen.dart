@@ -10,17 +10,13 @@ import '../../core/widgets/like_button.dart';
 import '../../core/widgets/post_type_badge.dart';
 import '../../core/widgets/user_avatar.dart';
 import '../../data/app_store.dart';
+import '../../models/comment.dart';
 import '../../models/post.dart';
+import '../post/create_post_screen.dart';
 import '../profile/user_profile_screen.dart';
 
 String _dayLabel(int days) => days == 1 ? 'ден' : 'дена';
 
-/// Детален преглед на објава — UI за коментари и реакции (like).
-///
-/// UI flow: Feed/Profile -> тап на објава -> PostDetail
-///          PostDetail -> внес коментар + "Испрати" -> коментарот се
-///          додава во листата веднаш (хронолошки), автор на објавата
-///          добива нотификација.
 class PostDetailScreen extends StatefulWidget {
   final String postId;
 
@@ -32,6 +28,12 @@ class PostDetailScreen extends StatefulWidget {
 
 class _PostDetailScreenState extends State<PostDetailScreen> {
   final _commentController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    appStore.fetchCommentsForPost(widget.postId);
+  }
 
   @override
   void dispose() {
@@ -46,23 +48,136 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
     _commentController.clear();
   }
 
+  Future<void> _editPost(Post post) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => CreatePostScreen(editingPost: post)),
+    );
+  }
+
+  Future<void> _deletePost(Post post) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Избриши објава?'),
+        content: const Text('Ова не може да се врати.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Откажи'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Избриши'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final error = await appStore.deletePost(post.id);
+    if (!mounted) return;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _editComment(Comment comment) async {
+    final controller = TextEditingController(text: comment.text);
+    final newText = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Уреди коментар'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 4,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Откажи'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('Зачувај'),
+          ),
+        ],
+      ),
+    );
+    if (newText == null || newText.trim().isEmpty) return;
+    final error = await appStore.updateComment(
+      postId: comment.postId,
+      commentId: comment.id,
+      text: newText,
+    );
+    if (!mounted || error == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+  }
+
+  Future<void> _deleteComment(Comment comment) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Избриши коментар?'),
+        content: const Text('Ова не може да се врати.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Откажи'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Избриши'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final error = await appStore.deleteComment(
+      postId: comment.postId,
+      commentId: comment.id,
+    );
+    if (!mounted || error == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Објава')),
-      body: ListenableBuilder(
-        listenable: appStore,
-        builder: (context, _) {
-          final post = appStore.postById(widget.postId);
-          if (post == null) {
-            return const Center(child: Text('Објавата не е пронајдена.'));
-          }
-          final author = appStore.userById(post.authorId);
-          final comments = appStore.commentsForPost(post.id);
-          final currentUserId = appStore.currentUserId;
-          final liked = currentUserId != null && post.likedByUser(currentUserId);
+    return ListenableBuilder(
+      listenable: appStore,
+      builder: (context, _) {
+        final post = appStore.postById(widget.postId);
+        if (post == null) {
+          return Scaffold(
+            appBar: AppBar(title: const Text('Објава')),
+            body: const Center(child: Text('Објавата не е пронајдена.')),
+          );
+        }
+        final author = appStore.userById(post.authorId);
+        final comments = appStore.commentsForPost(post.id);
+        final currentUserId = appStore.currentUserId;
+        final liked = currentUserId != null && post.likedByUser(currentUserId);
+        final isOwnPost = currentUserId != null && post.authorId == currentUserId;
 
-          return Column(
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Објава'),
+            actions: [
+              if (isOwnPost)
+                PopupMenuButton<String>(
+                  onSelected: (value) {
+                    if (value == 'edit') _editPost(post);
+                    if (value == 'delete') _deletePost(post);
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(value: 'edit', child: Text('Уреди')),
+                    PopupMenuItem(value: 'delete', child: Text('Избриши')),
+                  ],
+                ),
+            ],
+          ),
+          body: Column(
             children: [
               Expanded(
                 child: ListView(
@@ -130,7 +245,15 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                     if (comments.isEmpty)
                       const EmptyState(icon: AppIcons.comment, title: 'Сè уште нема коментари')
                     else
-                      ...comments.map((c) => CommentTile(comment: c)),
+                      ...comments.map((c) => CommentTile(
+                            comment: c,
+                            onEdit: c.authorId == currentUserId
+                                ? () => _editComment(c)
+                                : null,
+                            onDelete: c.authorId == currentUserId
+                                ? () => _deleteComment(c)
+                                : null,
+                          )),
                   ],
                 ),
               ),
@@ -162,9 +285,9 @@ class _PostDetailScreenState extends State<PostDetailScreen> {
                 ),
               ),
             ],
-          );
-        },
-      ),
+          ),
+        );
+      },
     );
   }
 }
